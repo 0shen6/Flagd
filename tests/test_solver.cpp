@@ -37,14 +37,16 @@ void bruteForce(const Board& b, std::vector<Pos>& hidden, std::vector<bool>& can
             for (int x = 0; x < b.width(); ++x) {
                 Pos p{x, y};
                 if (!b.at(p).revealed) continue;
+                const NumberView nv = b.view(p);
+                if (nv.liar) continue;
                 int sum = 0;
-                forNeighbors(b.width(), b.height(), p, [&](Pos n) {
+                b.forNeighbors(p, [&](Pos n) {
                     for (size_t i = 0; i < hidden.size(); ++i)
                         if (hidden[i] == n) sum += value[i];
                     const Monster* m = b.livingMonsterAt(n);
                     if (m && m->visible) sum += m->power;
                 });
-                if (sum != b.threatAt(p)) return false;
+                if (sum < nv.lo || sum > nv.hi) return false;
             }
         return true;
     };
@@ -101,8 +103,10 @@ TEST_CASE("solver deductions are sound against brute force on random small board
     Rng rng(12345);
     int checkedSafe = 0;
     int checkedMonsters = 0;
-    for (int trial = 0; trial < 400; ++trial) {
-        Board b(4, 4);
+    for (int trial = 0; trial < 1200; ++trial) {
+        // Every topology, with fog and liars mixed in.
+        Board b(4, 4, Topology(trial % 3));
+        b.fogged = trial % 4 == 3;
         std::vector<Pos> cells;
         for (int y = 0; y < 4; ++y)
             for (int x = 0; x < 4; ++x) cells.push_back({x, y});
@@ -116,6 +120,12 @@ TEST_CASE("solver deductions are sound against brute force on random small board
             if (!b.at(p).revealed) b.revealSafe(p);
         }
         if (rng.chance(0.3)) b.monsters()[0].visible = true;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                if (b.at({x, y}).revealed && rng.chance(0.1)) {
+                    b.at({x, y}).liar = true;
+                    b.at({x, y}).liarOffset = 1;
+                }
 
         std::vector<Pos> hidden;
         std::vector<bool> canSafe;
@@ -134,7 +144,7 @@ TEST_CASE("solver deductions are sound against brute force on random small board
         }
         // Completeness for small boards: anything brute force proves, the solver proves.
         for (size_t i = 0; i < hidden.size(); ++i) {
-            if (!canMonster[i]) CHECK(contains(r.safe, hidden[i]));
+            if (!canMonster[i] && canSafe[i]) CHECK(contains(r.safe, hidden[i]));
         }
     }
     CHECK(checkedSafe > 50);

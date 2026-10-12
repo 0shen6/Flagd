@@ -3,27 +3,50 @@
 #include <algorithm>
 
 #include "core/boardgen.h"
+#include "core/solver.h"
 
 namespace flagd {
+
+uint32_t baseRelicPool() {
+    uint32_t mask = 0;
+    for (int r = 0; r < kRelicKinds; ++r)
+        if (relicDef(RelicId(r)).unlockCost == 0) mask |= 1u << r;
+    return mask;
+}
 
 bool Player::has(RelicId r) const {
     return std::find(relics.begin(), relics.end(), r) != relics.end();
 }
 
 Player makePlayer(ClassId cls) {
+    const ClassDef& def = classDef(cls);
     Player p;
     p.cls = cls;
-    p.maxHp = classDef(cls).maxHp;
+    p.maxHp = def.maxHp;
     p.hp = p.maxHp;
+    p.gold = def.startGold;
+    p.relicPool = baseRelicPool();
     p.items = {ItemId::Potion};
+    if (cls == ClassId::Sapper) p.items.insert(p.items.end(), {ItemId::Defuser, ItemId::Defuser});
+    if (cls == ClassId::Seer) p.items.push_back(ItemId::Scanner);
     return p;
+}
+
+std::vector<RelicId> availableRelics(const Player& p) {
+    std::vector<RelicId> pool;
+    for (int r = 0; r < kRelicKinds; ++r)
+        if ((p.relicPool >> r) & 1u && !p.has(RelicId(r))) pool.push_back(RelicId(r));
+    return pool;
 }
 
 Encounter makeEncounter(const balance::FloorParams& params, uint64_t seed) {
     Encounter e;
     e.params = params;
     e.seed = seed;
-    e.board = Board(params.width, params.height);
+    Topology topo = Topology::Square;
+    if (!params.boss && params.modifier == Modifier::Wrap) topo = Topology::Wrap;
+    if (!params.boss && params.modifier == Modifier::Hex) topo = Topology::Hex;
+    e.board = Board(params.width, params.height, topo);
     e.rng.reseed(deriveSeed(seed, 0xE7C0));
     return e;
 }
@@ -34,8 +57,9 @@ bool addItem(Player& player, ItemId id) {
     return true;
 }
 
-void gainXp(Player& player, int amount, std::vector<Event>& events) {
+void gainXp(Player& player, int amount, std::vector<Event>& events, bool halved) {
     amount = std::max(amount, amount * classDef(player.cls).xpPercent / 100);
+    if (halved) amount /= 2;
     if (amount <= 0) return;
     player.xp += amount;
     events.push_back({EventType::XpGained, {}, amount});
@@ -43,7 +67,7 @@ void gainXp(Player& player, int amount, std::vector<Event>& events) {
         player.xp -= balance::xpToNext(player.level);
         ++player.level;
         player.maxHp += balance::kLevelUpMaxHp;
-        player.hp = player.maxHp;
+        player.hp = player.halfLevelHeal ? std::min(player.maxHp, player.hp + player.maxHp / 2) : player.maxHp;
         events.push_back({EventType::LevelUp, {}, player.level});
     }
 }
@@ -73,6 +97,15 @@ int colThreat(const Board& b, int x) {
 
 int tenthStepCountdown(const Encounter& enc) {
     return balance::kTenthStepEvery - enc.revealClicks % balance::kTenthStepEvery;
+}
+
+uint32_t lurkingKinds(const Board& b, Pos p) {
+    uint32_t mask = 0;
+    b.forNeighbors(p, [&](Pos n) {
+        const Monster* m = b.livingMonsterAt(n);
+        if (m && !m->visible) mask |= 1u << unsigned(m->kind);
+    });
+    return mask;
 }
 
 namespace {
@@ -135,23 +168,56 @@ private:
         }
     }
 
+    // Shows a hidden area without fighting: monsters become visible.
+    void expose(const std::vector<Pos>& cells) {
+        for (Pos q : cells) {
+            if (!(b_.isHidden(q) || b_.at(q).buried)) continue;
+            if (Monster* m = b_.livingMonsterAt(q)) m->visible = true;
+            else pickUp(b_.revealSafe(q));
+        }
+    }
+
     void generate(Pos first) {
-        const int radius = pl_.has(RelicId::LuckyStart) ? 2 : 1;
-        GeneratedBoard g = generateBoard(enc_.params, first, radius, enc_.seed);
+        balance::FloorParams params = enc_.params;
+        if (pl_.has(RelicId::Lantern)) params.fog = false;
+        const int radius = (pl_.has(RelicId::LuckyStart) ? 2 : 1) + enc_.bonusRadius;
+        GeneratedBoard g = generateBoard(params, first, radius, enc_.seed);
         b_ = std::move(g.board);
         enc_.generated = true;
         enc_.hintCount = int(g.hints.size());
+        for (int k = 0; k < kMonsterKinds; ++k)
+            if (params.counts[size_t(k)] > 0) pl_.seenKinds |= 1u << k;
+        pl_.seenModifiers |= 1u << int(params.modifier);
         pickUp(b_.revealSafe(first));
         for (Pos h : g.hints)
             if (!b_.at(h).revealed) pickUp(b_.revealSafe(h));
         if (!g.hints.empty()) ev_.push_back({EventType::HintsPlaced, first, int(g.hints.size())});
     }
 
+    int ambushMultiplier() const {
+        return pl_.cls == ClassId::Gambler ? balance::kGamblerAmbushMultiplier : balance::kAmbushMultiplier;
+    }
+
     void fight(int monsterId, Pos p, bool deliberate, bool free) {
         Monster& m = b_.monsters()[size_t(monsterId)];
         const MonsterDef& def = monsterDef(m.kind);
         const bool flagged = b_.at(p).mark != Mark::None;
-        int dmg = free ? 0 : def.hitCost * (deliberate ? 1 : balance::kAmbushMultiplier);
+        const bool ambush = !deliberate && !free;
+        const bool asleep = def.trait == Trait::Dormant && b_.surrounded(p);
+        const bool blast = ambush && def.trait == Trait::Explosive;
+
+        int dmg = 0;
+        if (free || asleep) {
+            dmg = 0;
+        } else if (blast) {
+            dmg = def.ambushDamage;
+            if (pl_.cls == ClassId::Sapper) dmg /= 2;
+            if (pl_.has(RelicId::BlastWard)) dmg = 0;
+        } else if (deliberate) {
+            dmg = (def.trait == Trait::Explosive && pl_.cls == ClassId::Sapper) ? 0 : def.hitCost;
+        } else {
+            dmg = def.ambushDamage > 0 ? def.ambushDamage : def.hitCost * ambushMultiplier();
+        }
         if (dmg > 0 && pl_.has(RelicId::ThickSkin)) dmg = std::max(0, dmg - 1);
         if (dmg > 0 && pl_.shield > 0) {
             --pl_.shield;
@@ -159,24 +225,53 @@ private:
             ev_.push_back({EventType::ShieldBlock, p});
         }
         m.visible = true;
-        damage(p, dmg, !deliberate);
+        damage(p, dmg, ambush);
         if (!pl_.alive()) return;
+
+        if (blast) {
+            // The keg is gone, no XP; everything around it is laid bare.
+            m.alive = false;
+            ev_.push_back({EventType::Explosion, p});
+            pickUp(b_.settleAfterKill(monsterId));
+            std::vector<Pos> around;
+            b_.forNeighbors(p, [&](Pos n) { around.push_back(n); });
+            expose(around);
+            return;
+        }
+        if (ambush && def.trait == Trait::Poison && !pl_.has(RelicId::GasMask)) {
+            pl_.poison = balance::kPoisonTurns;
+            ev_.push_back({EventType::Poisoned, p, pl_.poison});
+        }
+        if (ambush && def.trait == Trait::Curse && !pl_.has(RelicId::HolyWater) && !enc_.hexed) {
+            enc_.hexed = true;
+            ev_.push_back({EventType::Cursed, p});
+        }
+        if (asleep) ev_.push_back({EventType::Asleep, p});
 
         --m.hp;
         if (flagged && !free && pl_.has(RelicId::BountyFlags)) addGold(p, balance::kBountyGold);
-        gainXp(pl_, def.xp, ev_);
+        gainXp(pl_, def.xp, ev_, enc_.hexed);
         if (m.hp > 0) {
             ev_.push_back({EventType::BossHit, p, m.hp});
+            if (m.kind == MonsterKind::FogWyrm) liftFogAround(m);
             return;
         }
         m.alive = false;
         ++pl_.kills;
+        ++pl_.killsByKind[size_t(m.kind)];
         ev_.push_back({EventType::Kill, p, 0, int(m.kind)});
+        if (def.power >= 3 && pl_.has(RelicId::VampireFang)) heal(pl_, 1, ev_);
         pickUp(b_.settleAfterKill(monsterId));
         if (def.boss) {
             enc_.won = true;
             ev_.push_back({EventType::BossDefeated, p});
         }
+    }
+
+    void liftFogAround(const Monster& m) {
+        for (Pos c : m.cells)
+            for (Pos q : b_.within(c, 2)) b_.at(q).clearFog = true;
+        ev_.push_back({EventType::FogLifts, m.cells[0]});
     }
 
     // A click (or chord) on a cell the player cannot see into.
@@ -185,6 +280,12 @@ private:
         if (c.buried) {
             pickUp(b_.revealSafe(p));
             return;
+        }
+        // Gambler: was this a gamble? (Only asked for plain clicks.)
+        bool gamble = false;
+        if (pl_.cls == ClassId::Gambler && !fromChord && c.mark == Mark::None && b_.isHidden(p)) {
+            const SolverResult r = solve(b_);
+            gamble = std::find(r.safe.begin(), r.safe.end(), p) == r.safe.end();
         }
         if (Monster* m = b_.livingMonsterAt(p)) {
             const bool deliberate = m->visible || c.mark != Mark::None;
@@ -206,18 +307,22 @@ private:
             if (!pl_.alive()) return;
         }
         pickUp(b_.revealSafe(p));
+        if (gamble) {
+            ev_.push_back({EventType::Lucky, p});
+            heal(pl_, 1, ev_);
+        }
     }
 
     // Opens every unmarked hidden neighbour when the marks and visible monsters
-    // around p add up exactly to its number.
+    // around p account for its whole number.
     bool chord(Pos p) {
-        const int threat = b_.threatAt(p);
+        const NumberView nv = b_.view(p);
         int known = 0;
-        int seen[9];
+        int seen[8];
         int seenCount = 0;
         bool genericFlag = false;
         std::vector<Pos> targets;
-        forNeighbors(b_.width(), b_.height(), p, [&](Pos n) {
+        b_.forNeighbors(p, [&](Pos n) {
             const Cell& c = b_.at(n);
             if (c.buried) {
                 targets.push_back(n);
@@ -236,7 +341,7 @@ private:
             seen[seenCount++] = c.monster;
             known += m->power;
         });
-        if (targets.empty() || genericFlag || known != threat) {
+        if (targets.empty() || genericFlag || nv.liar || known != nv.hi) {
             invalid(p);
             return false;
         }
@@ -248,10 +353,11 @@ private:
             ++opened;
         }
         if (pl_.alive() && pl_.has(RelicId::WideChord)) {
-            forNeighbors(b_.width(), b_.height(), p, [&](Pos n) {
-                if (chebyshev(n, p) == 2 && b_.isHidden(n) && !b_.livingMonsterAt(n))
-                    pickUp(b_.revealSafe(n));
-            }, 2);
+            const auto dist = b_.distancesFrom(p);
+            for (size_t i = 0; i < dist.size(); ++i) {
+                const Pos n = b_.grid().posOf(i);
+                if (dist[i] == 2 && b_.isHidden(n) && !b_.livingMonsterAt(n)) pickUp(b_.revealSafe(n));
+            }
         }
         if (opened > 0 && pl_.has(RelicId::ChordMiner)) addGold(p, 1);
         return true;
@@ -267,9 +373,7 @@ private:
         ev_.push_back({EventType::ChestOpened, p});
         addGold(p, enc_.rng.range(10, 18) + 2 * enc_.params.depth);
         if (enc_.params.elite || enc_.params.boss) {
-            std::vector<RelicId> pool;
-            for (int r = 0; r < kRelicKinds; ++r)
-                if (!pl_.has(RelicId(r))) pool.push_back(RelicId(r));
+            const auto pool = availableRelics(pl_);
             if (pool.empty()) {
                 addGold(p, 40);
             } else {
@@ -288,17 +392,29 @@ private:
         }
     }
 
-    void endTurn() {
-        ++enc_.turn;
-        if (!pl_.alive()) return;
-        if (!enc_.cleared && !enc_.params.boss && b_.allSafeRevealed()) {
-            enc_.cleared = true;
-            const int bonus = balance::clearBonus(enc_.params.depth);
-            pl_.gold += bonus;
-            pl_.goldEarned += bonus;
-            ev_.push_back({EventType::BoardCleared, {}, bonus});
+    // Wisps drift to a random free neighbour; the tile they leave is lit up.
+    void wander() {
+        for (int id = 0; id < int(b_.monsters().size()); ++id) {
+            const Monster& m = b_.monsters()[size_t(id)];
+            if (!m.alive || monsterDef(m.kind).trait != Trait::Wanderer) continue;
+            const Pos from = m.cells[0];
+            std::vector<Pos> options;
+            b_.forNeighbors(from, [&](Pos n) {
+                const Cell& c = b_.at(n);
+                if (!b_.livingMonsterAt(n) && c.feature == Feature::None && !c.buried) options.push_back(n);
+            });
+            if (options.empty()) continue;
+            b_.moveMonster(id, enc_.rng.pick(options));
+            if (!b_.at(from).revealed) pickUp(b_.revealSafe(from));
         }
-        if (enc_.params.boss && !enc_.won && enc_.turn % balance::kBossBurrowEvery == 0) burrow();
+    }
+
+    void bossActs() {
+        for (const Monster& m : b_.monsters()) {
+            if (!m.alive) continue;
+            if (m.kind == MonsterKind::Burrower && enc_.turn % balance::kBossBurrowEvery == 0) burrow();
+            if (m.kind == MonsterKind::HiveMother && enc_.turn % balance::kHiveSpawnEvery == 0) spawnWisp(m);
+        }
     }
 
     // The Burrower re-covers one revealed number. The cell stays known-safe
@@ -309,13 +425,53 @@ private:
             for (int x = 0; x < b_.width(); ++x) {
                 Pos p{x, y};
                 const Cell& c = b_.at(p);
-                if (c.revealed && c.feature == Feature::None && b_.threatAt(p) > 0) candidates.push_back(p);
+                if (c.revealed && c.feature == Feature::None && !b_.livingMonsterAt(p) && b_.threatAt(p) > 0)
+                    candidates.push_back(p);
             }
         if (candidates.empty()) return;
         const Pos p = enc_.rng.pick(candidates);
         b_.at(p).revealed = false;
         b_.at(p).buried = true;
         ev_.push_back({EventType::Burrow, p});
+    }
+
+    void spawnWisp(const Monster& mother) {
+        int wisps = 0;
+        for (const Monster& m : b_.monsters()) wisps += m.alive && m.kind == MonsterKind::Wisp;
+        if (wisps >= balance::kHiveMaxWisps) return;
+        std::vector<Pos> spots;
+        for (Pos c : mother.cells)
+            b_.forNeighbors(c, [&](Pos n) {
+                const Cell& cell = b_.at(n);
+                if (!b_.livingMonsterAt(n) && cell.feature == Feature::None && !cell.buried) spots.push_back(n);
+            });
+        if (spots.empty()) return;
+        const Pos p = enc_.rng.pick(spots);
+        b_.addMonster(MonsterKind::Wisp, {p});
+        b_.at(p).mark = Mark::None;
+        ev_.push_back({EventType::Spawned, p});
+    }
+
+    void endTurn() {
+        ++enc_.turn;
+        if (!pl_.alive()) return;
+        if (pl_.poison > 0) {
+            --pl_.poison;
+            ev_.push_back({EventType::PoisonTick, {}, 1});
+            damage({}, 1);
+            if (!pl_.alive()) return;
+        }
+        if (!enc_.won) {
+            wander();
+            bossActs();
+        }
+        if (!enc_.cleared && !enc_.params.boss && b_.allSafeRevealed()) {
+            enc_.cleared = true;
+            const int bonus = balance::clearBonus(enc_.params.depth);
+            pl_.gold += bonus;
+            pl_.goldEarned += bonus;
+            ev_.push_back({EventType::BoardCleared, {}, bonus});
+        }
     }
 
     void reveal(Pos p) {
@@ -326,6 +482,11 @@ private:
             return;
         }
         Cell& c = b_.at(p);
+        if (Monster* m = b_.livingMonsterAt(p); m && m->visible && c.revealed) {
+            fight(c.monster, p, true, false);  // a Wisp standing on open ground
+            endTurn();
+            return;
+        }
         if (c.revealed) {
             if (c.feature == Feature::Chest && !c.chestOpen) return openChest(p);
             if (c.feature == Feature::Exit) return invalid(p);  // use Descend
@@ -345,6 +506,7 @@ private:
     void descend() {
         if (!enc_.exitFound && !enc_.won) return invalid({});
         enc_.descended = true;
+        pl_.poison = 0;
         ev_.push_back({EventType::Descend});
     }
 
@@ -355,13 +517,7 @@ private:
         bool takesTurn = false;
         switch (id) {
             case ItemId::Scanner:
-                for (int dy = -1; dy <= 1; ++dy)
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        Pos q{p.x + dx, p.y + dy};
-                        if (!b_.inBounds(q) || !(b_.isHidden(q) || b_.at(q).buried)) continue;
-                        if (Monster* m = b_.livingMonsterAt(q)) m->visible = true;
-                        else pickUp(b_.revealSafe(q));
-                    }
+                expose(b_.within(p, 1));
                 takesTurn = true;
                 break;
             case ItemId::Defuser:
@@ -384,7 +540,8 @@ private:
                 ++pl_.shield;
                 break;
             case ItemId::Potion:
-                if (pl_.hp >= pl_.maxHp) return invalid(p);
+                if (pl_.hp >= pl_.maxHp && pl_.poison == 0) return invalid(p);
+                pl_.poison = 0;
                 heal(pl_, balance::kPotionHeal, ev_);
                 break;
             case ItemId::Count:

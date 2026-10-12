@@ -4,28 +4,19 @@
 
 namespace flagd {
 
-namespace {
-
-std::vector<RelicId> unownedRelics(const Player& p) {
-    std::vector<RelicId> pool;
-    for (int r = 0; r < kRelicKinds; ++r)
-        if (!p.has(RelicId(r))) pool.push_back(RelicId(r));
-    return pool;
-}
-
-} // namespace
-
 std::vector<int> Run::choices() const {
     if (over) return {};
     if (current < 0) return map.layer(0);
     return map.nodes[size_t(current)].next;
 }
 
-Run newRun(uint64_t seed, ClassId cls) {
+Run newRun(uint64_t seed, ClassId cls, int heat) {
     Run r;
     r.seed = seed;
+    r.heat = heat;
     r.player = makePlayer(cls);
-    r.map = generateMap(seed);
+    r.player.halfLevelHeal = heat >= 3;
+    r.map = generateMap(seed, heat);
     return r;
 }
 
@@ -34,13 +25,24 @@ bool travel(Run& run, int nodeId) {
     if (std::find(opts.begin(), opts.end(), nodeId) == opts.end()) return false;
     run.current = nodeId;
     run.path.push_back(nodeId);
+    run.deepestLayer = std::max(run.deepestLayer, run.node(nodeId).layer);
     return true;
 }
 
 Encounter makeEncounterFor(const Run& run, int nodeId) {
     const MapNode& n = run.node(nodeId);
-    const auto params = balance::floorParams(n.layer, n.type == NodeType::Elite, n.type == NodeType::Boss);
+    const auto params = balance::floorParams(n.layer, n.type == NodeType::Elite, n.type == NodeType::Boss,
+                                             run.map.bossKind, n.modifier, run.heat);
     return makeEncounter(params, deriveSeed(run.seed, uint64_t(nodeId) + 1));
+}
+
+Encounter beginEncounter(Run& run, int nodeId) {
+    Encounter e = makeEncounterFor(run, nodeId);
+    e.bonusRadius = run.nextBonusRadius;
+    e.hexed = run.nextHexed;
+    run.nextBonusRadius = 0;
+    run.nextHexed = false;
+    return e;
 }
 
 void finishBoard(Run& run, const Encounter& enc) {
@@ -64,16 +66,16 @@ std::vector<ShopOffer> makeShop(const Run& run, int nodeId) {
     for (int i = 0; i < 3; ++i) {
         ShopOffer o;
         o.id = items[size_t(i)];
-        o.price = itemDef(ItemId(o.id)).price + rng.range(-3, 3);
+        o.price = balance::shopPrice(itemDef(ItemId(o.id)).price + rng.range(-3, 3), run.heat);
         offers.push_back(o);
     }
-    auto relics = unownedRelics(run.player);
+    auto relics = availableRelics(run.player);
     rng.shuffle(relics);
     for (size_t i = 0; i < relics.size() && i < 2; ++i) {
         ShopOffer o;
         o.relic = true;
         o.id = int(relics[i]);
-        o.price = relicDef(relics[i]).price + rng.range(-8, 8);
+        o.price = balance::shopPrice(relicDef(relics[i]).price + rng.range(-8, 8), run.heat);
         offers.push_back(o);
     }
     return offers;
@@ -96,6 +98,7 @@ bool buy(Run& run, ShopOffer& offer) {
 void restHeal(Player& player) {
     const int amount = std::max(1, player.maxHp * balance::kRestHealPercent / 100);
     player.hp = std::min(player.maxHp, player.hp + amount);
+    player.poison = 0;
 }
 
 void restFortify(Player& player) {
@@ -107,7 +110,7 @@ TreasureLoot takeTreasure(Run& run, int nodeId) {
     Rng rng(deriveSeed(run.seed, 0x7000 + uint64_t(nodeId)));
     TreasureLoot loot;
     loot.gold = rng.range(12, 24);
-    auto pool = unownedRelics(run.player);
+    const auto pool = availableRelics(run.player);
     if (pool.empty()) {
         loot.gold += 50;
     } else {
@@ -118,6 +121,106 @@ TreasureLoot takeTreasure(Run& run, int nodeId) {
     run.player.gold += loot.gold;
     run.player.goldEarned += loot.gold;
     return loot;
+}
+
+// ---- Events -----------------------------------------------------------------
+
+namespace {
+
+constexpr EventDef kEvents[] = {
+    {"Blood Shrine", "A stone altar hums. A carved hand waits, palm up.",
+     {"Offer 5 HP for a relic", "Leave"}},
+    {"Dice in the Dark", "A grinning stranger rattles two bone dice. \"Double or nothing?\"",
+     {"Bet 25 gold (50%: win 60)", "Leave"}},
+    {"Glowing Spring", "Clear water bubbles up between the stones.",
+     {"Drink (heal 50%, cure poison)", "Fill a flask (gain a Potion)"}},
+    {"Old Cartographer", "\"I know these tunnels. For a price, I'll show you a safe way in.\"",
+     {"Pay 15 gold: next board opens wider", "Leave"}},
+    {"Cursed Chest", "Chains wrapped in purple thread. Something inside clinks.",
+     {"Open it: 2 items, next board cursed", "Leave"}},
+    {"Training Dummy", "A straw dummy, scarred by many blades.",
+     {"Spar: lose 3 HP, gain 8 XP", "Leave"}},
+};
+static_assert(sizeof(kEvents) / sizeof(kEvents[0]) == int(EventId::Count));
+
+} // namespace
+
+const EventDef& eventDef(EventId id) { return kEvents[int(id)]; }
+
+EventId eventAt(const Run& run, int nodeId) {
+    return EventId(deriveSeed(run.seed, 0x9000 + uint64_t(nodeId)) % uint64_t(EventId::Count));
+}
+
+bool eventOptionAllowed(const Run& run, EventId id, int option) {
+    const Player& p = run.player;
+    if (option != 0) return id != EventId::Spring || int(p.items.size()) < balance::kInventorySlots;
+    switch (id) {
+        case EventId::BloodShrine: return p.hp > 5 && !availableRelics(p).empty();
+        case EventId::Gamble: return p.gold >= 25;
+        case EventId::Spring: return true;
+        case EventId::Cartographer: return p.gold >= 15;
+        case EventId::CursedChest: return true;
+        case EventId::TrainingDummy: return p.hp > 3;
+        case EventId::Count: break;
+    }
+    return false;
+}
+
+std::string resolveEvent(Run& run, int nodeId, int option) {
+    const EventId id = eventAt(run, nodeId);
+    if (!eventOptionAllowed(run, id, option)) return "";
+    Player& p = run.player;
+    Rng rng(deriveSeed(run.seed, 0x9100 + uint64_t(nodeId)));
+    std::vector<Event> ignored;
+    switch (id) {
+        case EventId::BloodShrine: {
+            if (option == 1) return "You leave the altar untouched.";
+            p.hp -= 5;
+            const RelicId r = rng.pick(availableRelics(p));
+            p.relics.push_back(r);
+            return std::string("The altar drinks. You receive: ") + relicDef(r).name + ".";
+        }
+        case EventId::Gamble:
+            if (option == 1) return "The stranger shrugs and vanishes.";
+            p.gold -= 25;
+            if (rng.chance(0.5)) {
+                p.gold += 60;
+                p.goldEarned += 60;
+                return "Snake eyes... for him! You win 60 gold.";
+            }
+            return "The dice betray you. 25 gold gone.";
+        case EventId::Spring:
+            if (option == 0) {
+                p.hp = std::min(p.maxHp, p.hp + p.maxHp / 2);
+                p.poison = 0;
+                return "Cool and bright. You feel restored.";
+            }
+            addItem(p, ItemId::Potion);
+            return "You fill a flask. (+1 Potion)";
+        case EventId::Cartographer:
+            if (option == 1) return "\"Your loss,\" he mutters.";
+            p.gold -= 15;
+            run.nextBonusRadius = 2;
+            return "He sketches a safe path. Your next board opens wider.";
+        case EventId::CursedChest: {
+            if (option == 1) return "Some things are best left shut.";
+            std::string got;
+            for (int i = 0; i < 2; ++i) {
+                const ItemId item = ItemId(rng.range(0, kItemKinds - 1));
+                if (addItem(p, item)) got += std::string(got.empty() ? "" : ", ") + itemDef(item).name;
+            }
+            run.nextHexed = true;
+            return "Purple smoke curls around you. Found: " + (got.empty() ? std::string("nothing (bag full)") : got) +
+                   ". Your next board is cursed.";
+        }
+        case EventId::TrainingDummy:
+            if (option == 1) return "You save your strength.";
+            p.hp -= 3;
+            gainXp(p, 8, ignored);
+            return "A good workout. (+8 XP)";
+        case EventId::Count: break;
+    }
+    return "";
 }
 
 } // namespace flagd

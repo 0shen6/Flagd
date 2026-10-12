@@ -27,6 +27,9 @@ constexpr Spr Trophy{40, 16};
 constexpr Spr Skull{38, 11};
 constexpr Spr Hourglass{40, 12};
 constexpr Spr ShieldIcon{37, 3};
+constexpr Spr Ember{28, 11};
+constexpr Spr Book{34, 15};
+constexpr Spr Question{37, 13};
 } // namespace spr
 
 Spr monsterSprite(MonsterKind k);

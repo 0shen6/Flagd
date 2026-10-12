@@ -106,6 +106,30 @@ void TreasureScene::draw(App& app) {
     ui::playerPanel(*app.game, nullptr, -1);
 }
 
+// ---- Event ------------------------------------------------------------------
+
+void EventScene::update(App&, float) {}
+
+void EventScene::draw(App& app) {
+    Run& run = *app.game;
+    const EventId id = eventAt(run, nodeId_);
+    const EventDef& d = eventDef(id);
+    roomHeader(d.title, "");
+    atlas().draw(spr::Question, 360, 56, pal::Blue, 4);
+    ui::textWrapped(d.text, 220, 130, 300, pal::Bone);
+    if (outcome_.empty()) {
+        for (int o = 0; o < 2; ++o) {
+            const bool allowed = eventOptionAllowed(run, id, o);
+            if (ui::button({220, 180 + float(o) * 30, 300, 24}, d.options[o], allowed))
+                outcome_ = resolveEvent(run, nodeId_, o);
+        }
+    } else {
+        ui::textWrapped(outcome_, 220, 186, 300, pal::Gold);
+        if (leaveButton("Continue")) app.toMap();
+    }
+    ui::playerPanel(run, nullptr, -1);
+}
+
 // ---- End of run -------------------------------------------------------------
 
 void EndScene::update(App&, float dt) { time_ += dt; }
@@ -115,32 +139,45 @@ void EndScene::draw(App& app) {
     const Player& p = run.player;
     const float cx = ui::kCanvasW / 2.0f;
     if (run.victory) {
-        atlas().draw(spr::Trophy, cx - 24, 30, pal::Gold, 3);
-        ui::textCentered("VICTORY", cx, 88, pal::Gold, 30);
-        ui::textCentered("The Burrower is no more. The depths are yours.", cx, 124, pal::Bone);
+        atlas().draw(spr::Trophy, cx - 16, 14, pal::Gold, 2);
+        ui::textCentered("VICTORY", cx, 50, pal::Gold, 30);
+        ui::textCentered(std::string("The ") + monsterDef(run.map.bossKind).name + " is no more. The depths are yours.",
+                         cx, 84, pal::Bone);
     } else {
-        atlas().draw(spr::Skull, cx - 24, 30, pal::Red, 3);
-        ui::textCentered("DEFEAT", cx, 88, pal::Red, 30);
-        ui::textCentered("Another flag planted in the dark.", cx, 124, pal::Bone);
+        atlas().draw(spr::Skull, cx - 16, 14, pal::Red, 2);
+        ui::textCentered("DEFEAT", cx, 50, pal::Red, 30);
+        ui::textCentered("Another flag planted in the dark.", cx, 84, pal::Bone);
     }
 
-    const Rectangle box{cx - 140, 150, 280, 130};
+    const Rectangle box{cx - 140, 102, 280, 128};
     ui::panel(box);
-    const std::pair<const char*, std::string> stats[] = {
+    const std::pair<const char*, std::string> stats[8] = {
         {"Floors completed", std::to_string(p.floorsCleared)},
         {"Monsters slain", std::to_string(p.kills)},
         {"Tiles revealed", std::to_string(p.tilesRevealed)},
         {"Gold earned", std::to_string(p.goldEarned)},
         {"Level reached", std::to_string(p.level)},
         {"Relics", std::to_string(p.relics.size())},
-        {"Seed", std::to_string(run.seed)},
+        {"Seed", std::to_string(run.seed) + (run.heat ? "  heat " + std::to_string(run.heat) : "")},
+        {"Class", classDef(p.cls).name},
     };
-    for (int i = 0; i < 7; ++i) {
-        const float y = box.y + 10 + float(i) * 16;
+    for (int i = 0; i < 8; ++i) {
+        const float y = box.y + 6 + float(i) * 15;
         ui::text(stats[i].first, box.x + 14, y, pal::Dim);
         ui::text(stats[i].second, box.x + box.width - 14 - float(ui::textWidth(stats[i].second)), y, pal::Bone);
     }
-    if (ui::button({cx - 70, 300, 140, 24}, "Back to title") || (time_ > 0.5f && IsKeyPressed(KEY_ENTER)))
+    // Meta rewards
+    const RunResult& res = app.lastResult;
+    float y = 242;
+    atlas().draw(spr::Ember, cx - 60, y - 4, pal::Orange);
+    ui::text("+" + std::to_string(res.embers) + " embers (" + std::to_string(app.meta.embers) + " total)", cx - 42, y,
+             pal::Orange);
+    for (const std::string& u : res.unlocks) {
+        y += 12;
+        ui::textCentered(u, cx, y, pal::Gold);
+    }
+    if (ui::button({cx - 70, 330, 140, 22}, "Back to title") ||
+        (time_ > 0.5f && IsKeyPressed(KEY_ENTER)))
         app.toTitle();
 }
 

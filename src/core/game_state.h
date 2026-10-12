@@ -1,6 +1,7 @@
 #pragma once
 // Player + one board ("encounter") and the rules that connect them. All game
 // rules run through applyAction(), which returns Events for the UI to animate.
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -11,6 +12,9 @@
 
 namespace flagd {
 
+// Relics available from the start (unlockCost == 0), as a bitmask.
+uint32_t baseRelicPool();
+
 struct Player {
     ClassId cls = ClassId::Warrior;
     int hp = 10;
@@ -19,20 +23,29 @@ struct Player {
     int xp = 0;
     int gold = 0;
     int shield = 0;
+    int poison = 0;               // turns of 1-damage poison left
+    bool halfLevelHeal = false;   // heat 3+
+    uint32_t relicPool = 0;       // relics that may drop this run (bitmask of RelicId)
     std::vector<ItemId> items;
     std::vector<RelicId> relics;
 
-    // Run statistics
+    // Run statistics (also feed the codex)
     int kills = 0;
     int tilesRevealed = 0;
     int floorsCleared = 0;
     int goldEarned = 0;
+    std::array<int, kMonsterKinds> killsByKind{};
+    uint32_t seenKinds = 0;      // bitmask of MonsterKind met
+    uint32_t seenModifiers = 0;  // bitmask of Modifier met
 
     bool has(RelicId r) const;
     bool alive() const { return hp > 0; }
 };
 
 Player makePlayer(ClassId cls);
+
+// Relics not owned and allowed by the run's pool.
+std::vector<RelicId> availableRelics(const Player& p);
 
 struct Encounter {
     balance::FloorParams params;
@@ -41,9 +54,11 @@ struct Encounter {
     bool generated = false;
     int turn = 0;
     int revealClicks = 0;  // clicks on hidden cells (Tenth Step)
+    int bonusRadius = 0;   // extra opening size (Cartographer event)
     bool hasKey = false;
     bool exitFound = false;
     bool cleared = false;
+    bool hexed = false;      // cursed: XP halved for this board
     bool won = false;        // boss slain
     bool lost = false;       // player died
     bool descended = false;  // took the exit
@@ -90,6 +105,14 @@ enum class EventType : uint8_t {
     WrongFlag,
     Burrow,       // the Burrower re-covered pos
     HintsPlaced,  // amount = hint tiles revealed
+    Explosion,    // a keg blew at pos
+    Poisoned,     // amount = turns
+    PoisonTick,   // amount = damage
+    Cursed,       // XP halved for this board
+    Asleep,       // a dormant monster was slain without waking
+    Lucky,        // Gambler: an unproven reveal paid off
+    FogLifts,     // the Fog Wyrm was hit; fog cleared around it
+    Spawned,      // a Wisp was born at pos
     PlayerDied,
     Invalid,
 };
@@ -105,7 +128,7 @@ std::vector<Event> applyAction(Player& player, Encounter& enc, const Action& act
 
 // Adds an item if there is room. Returns false if the inventory is full.
 bool addItem(Player& player, ItemId id);
-void gainXp(Player& player, int amount, std::vector<Event>& events);
+void gainXp(Player& player, int amount, std::vector<Event>& events, bool halved = false);
 void heal(Player& player, int amount, std::vector<Event>& events);
 
 // Total power of living monsters with a cell in this row / column (Flare).
@@ -114,5 +137,8 @@ int colThreat(const Board& b, int x);
 
 // Reveals left before Tenth Step protects a click (1 = the next click).
 int tenthStepCountdown(const Encounter& enc);
+
+// Seer's sight: bitmask of MonsterKinds among living hidden neighbours of p.
+uint32_t lurkingKinds(const Board& b, Pos p);
 
 } // namespace flagd

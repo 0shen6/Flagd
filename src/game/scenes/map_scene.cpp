@@ -16,7 +16,8 @@ const char* nodeBlurb(NodeType t) {
         case NodeType::Shop: return "Spend gold on items and relics.";
         case NodeType::Rest: return "Heal, or train to raise max HP.";
         case NodeType::Treasure: return "A free relic and some gold.";
-        case NodeType::Boss: return "The Burrower. Slay it to win the run.";
+        case NodeType::Event: return "Something unusual. A choice awaits.";
+        case NodeType::Boss: return "The guardian of the depths. Slay it to win the run.";
     }
     return "";
 }
@@ -45,7 +46,8 @@ void MapScene::draw(App& app) {
     const Run& run = *app.game;
     const auto choices = run.choices();
     ui::text("Choose your path", 172, 8, pal::Bone);
-    ui::text("Each step leads deeper. The Burrower waits at the bottom.", 172, 21, pal::Dim);
+    ui::text(std::string("Each step leads deeper. The ") + monsterDef(run.map.bossKind).name + " waits at the bottom.",
+             172, 21, pal::Dim);
     ui::playerPanel(run, nullptr, -1);
 
     // Edges
@@ -77,21 +79,35 @@ void MapScene::draw(App& app) {
         Color tint = nodeColor(n.type);
         if (!available && !visited && id != run.current) tint = Fade(tint, 0.45f);
         if (visited && id != run.current) tint = pal::Line;
-        atlas().draw(nodeSprite(n.type), r.x + half - (boss ? 16 : 8), r.y + half - (boss ? 16 : 8), tint,
-                     boss ? 2.0f : 1.0f);
-        if (ui::hover(r)) ui::setTooltip(nodeTypeName(n.type), nodeBlurb(n.type));
+        const Spr icon = boss ? monsterSprite(run.map.bossKind) : nodeSprite(n.type);
+        atlas().draw(icon, r.x + half - (boss ? 16 : 8), r.y + half - (boss ? 16 : 8), tint, boss ? 2.0f : 1.0f);
+        if (n.modifier != Modifier::None) {
+            // Badge: first letter of the twist (W, H, F, L).
+            const std::string badge(1, modifierDef(n.modifier).name[0]);
+            DrawRectangle(int(r.x + r.width - 6), int(r.y - 4), 9, 10, pal::Blue);
+            ui::text(badge, r.x + r.width - 5, r.y - 4, pal::Bg);
+        }
+        if (ui::hover(r)) {
+            std::string body = nodeBlurb(n.type);
+            if (n.modifier != Modifier::None)
+                body += std::string(" Twist: ") + modifierDef(n.modifier).name + ". " + modifierDef(n.modifier).desc;
+            if (boss) body = std::string("The ") + monsterDef(run.map.bossKind).name + ". " +
+                             monsterDef(run.map.bossKind).blurb + " Slay it to win the run.";
+            ui::setTooltip(nodeTypeName(n.type), body);
+        }
         if (available && ui::clicked(r)) clickedNode_ = id;
     }
 
     // Legend, inside the side panel
     ui::text("LEGEND", 10, 214, pal::Bone);
     const NodeType legend[] = {NodeType::Normal, NodeType::Elite, NodeType::Shop, NodeType::Rest, NodeType::Treasure,
-                               NodeType::Boss};
+                               NodeType::Event};
     for (int i = 0; i < 6; ++i) {
         const float y = 228 + float(i) * 17;
         atlas().draw(nodeSprite(legend[i]), 10, y, nodeColor(legend[i]));
         ui::text(nodeTypeName(legend[i]), 30, y + 4, pal::Dim);
     }
+    ui::text("Blue badge: board twist", 10, 332, pal::Blue);
 }
 
 } // namespace flagd

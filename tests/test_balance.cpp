@@ -20,6 +20,7 @@ struct BotStats {
     std::map<int, int> deathsByLayer;
     long levelAtBoss = 0;
     int reachedBoss = 0;
+    std::map<int, std::pair<int, int>> byBoss;  // boss kind -> (wins, fights)
 };
 
 Mark markFor(int power) {
@@ -83,7 +84,23 @@ void playBoard(Player& pl, Encounter& enc, bool marks) {
         }
         for (const Monster& m : b.monsters())
             if (m.alive && m.visible) consider(m.cells[0], monsterDef(m.kind).hitCost, monsterDef(m.kind).xp);
+        auto slotOf = [&](ItemId id) {
+            auto it = std::find(pl.items.begin(), pl.items.end(), id);
+            return it == pl.items.end() ? -1 : int(it - pl.items.begin());
+        };
         if (target.x >= 0) {
+            const Monster* tm = b.livingMonsterAt(target);
+            const int cost = tm ? monsterDef(tm->kind).hitCost : 0;
+            // Spend items on the big fights: a Defuser is a free kill (or boss hit),
+            // a Shield makes the next fight free.
+            if (cost >= 3 && slotOf(ItemId::Defuser) >= 0 && !b.isHidden(target)) {
+                applyAction(pl, enc, {ActionType::UseItem, target, Mark::None, slotOf(ItemId::Defuser)});
+                continue;
+            }
+            if (cost >= 3 && slotOf(ItemId::Shield) >= 0 && pl.shield == 0) {
+                applyAction(pl, enc, {ActionType::UseItem, {}, Mark::None, slotOf(ItemId::Shield)});
+                continue;
+            }
             const Cell& c = b.at(target);
             if (marks && b.isHidden(target) && c.mark == Mark::None) {
                 int power = 0;
@@ -98,7 +115,18 @@ void playBoard(Player& pl, Encounter& enc, bool marks) {
             applyAction(pl, enc, {ActionType::Descend});
             continue;
         }
-        // Stuck: nothing safe, nothing affordable, no exit. Drink anything, then fight anyway.
+        // Stuck: nothing safe, nothing affordable, no exit. Scan the frontier,
+        // drink anything, then fight anyway.
+        if (slotOf(ItemId::Scanner) >= 0) {
+            Pos spot{-1, -1};
+            for (int y = 0; y < b.height() && spot.x < 0; ++y)
+                for (int x = 0; x < b.width() && spot.x < 0; ++x)
+                    if (b.isHidden({x, y})) spot = {x, y};
+            if (spot.x >= 0) {
+                applyAction(pl, enc, {ActionType::UseItem, spot, Mark::None, slotOf(ItemId::Scanner)});
+                continue;
+            }
+        }
         if (!pl.items.empty() && pl.hp < pl.maxHp) {
             auto it = std::find(pl.items.begin(), pl.items.end(), ItemId::Potion);
             if (it != pl.items.end()) {
@@ -118,8 +146,9 @@ void playBoard(Player& pl, Encounter& enc, bool marks) {
     }
 }
 
-bool playRun(uint64_t seed, BotStats& st, bool marks) {
-    Run run = newRun(seed, ClassId::Warrior);
+bool playRun(uint64_t seed, BotStats& st, bool marks, ClassId cls = ClassId::Warrior) {
+    Run run = newRun(seed, cls);
+    run.player.relicPool = (1u << kRelicKinds) - 1;
     Rng rng(seed ^ 0xB07);
     while (!run.over) {
         const auto choices = run.choices();
@@ -136,6 +165,7 @@ bool playRun(uint64_t seed, BotStats& st, bool marks) {
                 case NodeType::Rest: score += hurt ? 8 : 1; break;
                 case NodeType::Shop: score += run.player.gold >= 30 ? 5 : 0; break;
                 case NodeType::Treasure: score += 6; break;
+                case NodeType::Event: score += 3; break;
                 case NodeType::Boss: score += 10; break;
             }
             if (score > bestScore) {
@@ -149,8 +179,9 @@ bool playRun(uint64_t seed, BotStats& st, bool marks) {
             if (n.type == NodeType::Boss) {
                 ++st.reachedBoss;
                 st.levelAtBoss += run.player.level;
+                ++st.byBoss[int(run.map.bossKind)].second;
             }
-            Encounter enc = makeEncounterFor(run, pick);
+            Encounter enc = beginEncounter(run, pick);
             playBoard(run.player, enc, marks);
             REQUIRE((enc.lost || enc.won || enc.descended));
             finishBoard(run, enc);
@@ -163,10 +194,14 @@ bool playRun(uint64_t seed, BotStats& st, bool marks) {
             for (auto& o : offers) buy(run, o);
         } else if (n.type == NodeType::Treasure) {
             takeTreasure(run, pick);
+        } else if (n.type == NodeType::Event) {
+            const EventId e = eventAt(run, pick);
+            resolveEvent(run, pick, eventOptionAllowed(run, e, 0) && run.player.hp * 2 > run.player.maxHp ? 0 : 1);
         }
     }
     ++st.runs;
     st.wins += run.victory;
+    if (run.victory) ++st.byBoss[int(run.map.bossKind)].first;
     return run.victory;
 }
 
@@ -175,7 +210,14 @@ std::string report(const BotStats& st) {
     for (const auto& [layer, n] : st.deathsByLayer) deaths += " F" + std::to_string(layer + 1) + ":" + std::to_string(n);
     return "wins " + std::to_string(st.wins) + "/" + std::to_string(st.runs) + ", deaths by floor:" + deaths +
            ", avg level at boss " +
-           std::to_string(st.reachedBoss ? double(st.levelAtBoss) / st.reachedBoss : 0.0);
+           std::to_string(st.reachedBoss ? double(st.levelAtBoss) / st.reachedBoss : 0.0).substr(0, 4) + ", bosses:" +
+           [&] {
+               std::string b;
+               for (const auto& [k, wf] : st.byBoss)
+                   b += std::string(" ") + monsterDef(MonsterKind(k)).name + " " + std::to_string(wf.first) + "/" +
+                        std::to_string(wf.second);
+               return b;
+           }();
 }
 
 } // namespace
@@ -194,4 +236,13 @@ TEST_CASE("autoplay: runs always finish; careful play beats sloppy play") {
     // A perfect deducer should win most runs; skipping marks should hurt.
     CHECK(careful.wins >= careful.runs / 2);
     CHECK(careful.wins > sloppy.wins);
+}
+
+TEST_CASE("autoplay: every class can win" * doctest::skip()) {
+    for (int c = 0; c < kClassKinds; ++c) {
+        BotStats st;
+        for (uint64_t seed = 1; seed <= 60; ++seed) playRun(seed * 7919, st, true, ClassId(c));
+        MESSAGE(std::string(classDef(ClassId(c)).name) << ": " << report(st));
+        CHECK(st.wins > 0);
+    }
 }

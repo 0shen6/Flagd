@@ -1,6 +1,7 @@
 #pragma once
-// A whole run: player, map position, and the non-board rooms (shop, rest, treasure).
+// A whole run: player, map position, and the non-board rooms (shop, rest, treasure, events).
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/game_state.h"
@@ -10,24 +11,33 @@ namespace flagd {
 
 struct Run {
     uint64_t seed = 0;
+    int heat = 0;
     Player player;
     Map map;
     int current = -1;       // node id; -1 before the first choice
     std::vector<int> path;  // nodes visited, in order
     bool over = false;
     bool victory = false;
+    int deepestLayer = -1;  // deepest layer entered
+
+    // Effects carried into the next board (from events).
+    int nextBonusRadius = 0;
+    bool nextHexed = false;
 
     // Nodes the player may move to next.
     std::vector<int> choices() const;
     const MapNode& node(int id) const { return map.nodes[size_t(id)]; }
 };
 
-Run newRun(uint64_t seed, ClassId cls);
+Run newRun(uint64_t seed, ClassId cls, int heat = 0);
 
 // Moves to a node offered by choices(). Returns false if not allowed.
 bool travel(Run& run, int nodeId);
 
+// The board for a node, as rolled from the run seed.
 Encounter makeEncounterFor(const Run& run, int nodeId);
+// Same, and applies (then clears) effects carried over from events.
+Encounter beginEncounter(Run& run, int nodeId);
 
 // Call after a board ends (descended or boss slain).
 void finishBoard(Run& run, const Encounter& enc);
@@ -51,5 +61,21 @@ struct TreasureLoot {
     int gold = 0;
 };
 TreasureLoot takeTreasure(Run& run, int nodeId);
+
+// ---- Events ("?" nodes) -----------------------------------------------------
+
+enum class EventId : uint8_t { BloodShrine, Gamble, Spring, Cartographer, CursedChest, TrainingDummy, Count };
+
+struct EventDef {
+    const char* title;
+    const char* text;
+    const char* options[2];
+};
+
+const EventDef& eventDef(EventId id);
+EventId eventAt(const Run& run, int nodeId);
+bool eventOptionAllowed(const Run& run, EventId id, int option);
+// Applies the chosen option and returns a line describing what happened.
+std::string resolveEvent(Run& run, int nodeId, int option);
 
 } // namespace flagd

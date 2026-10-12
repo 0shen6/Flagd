@@ -27,6 +27,7 @@ constexpr Color Green{56, 217, 115, 255};
 constexpr Color Gold{244, 180, 27, 255};
 constexpr Color Orange{238, 132, 52, 255};
 constexpr Color Maroon{122, 68, 74, 255};
+constexpr Color Purple{176, 98, 220, 255};
 } // namespace pal
 
 namespace ui {
@@ -64,6 +65,7 @@ void drawTooltip();
 // slot sets clickedSlot.
 struct HudResult {
     int clickedSlot = -1;
+    float bottom = 0;  // y just below the items
 };
 HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot);
 

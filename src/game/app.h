@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "core/meta.h"
 #include "core/run.h"
 
 namespace flagd {
@@ -31,6 +32,7 @@ struct ShotStep {
 class App {
 public:
     int loop();
+    // Screenshot mode also keeps its save file in `dir`, away from the real one.
     void setShotScript(std::string dir, std::vector<ShotStep> steps) {
         shotDir_ = std::move(dir);
         shotSteps_ = std::move(steps);
@@ -40,14 +42,17 @@ public:
     void go(std::unique_ptr<Scene> next) { pending_ = std::move(next); }
     void toTitle();
     void toMap();
-    void toEnd();
-    void startRun(uint64_t seed);
+    void toEnd();  // banks the run into meta progress (once) and saves
+    void startRun(uint64_t seed, ClassId cls, int heat);
     void enterNode(int nodeId);
+    void saveProgress();
 
     void shake(float seconds) { shake_ = std::max(shake_, seconds); }
     void quit() { quit_ = true; }
 
     std::optional<Run> game;
+    Meta meta;
+    RunResult lastResult;  // embers and unlocks from the run that just ended
 
 private:
     void present();
@@ -57,6 +62,10 @@ private:
     RenderTexture2D canvas_{};
     float shake_ = 0;
     bool quit_ = false;
+    void loadProgress();
+    std::string savePath() const;
+
+    bool runBanked_ = false;
     std::string shotDir_;
     std::vector<ShotStep> shotSteps_;
 };

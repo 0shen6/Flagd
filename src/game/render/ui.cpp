@@ -132,7 +132,8 @@ HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot) {
     bar({ix, 30, iw, 12}, float(p.hp) / float(std::max(1, p.maxHp)), pal::Red, pal::Maroon);
     textCentered("HP " + std::to_string(p.hp) + "/" + std::to_string(p.maxHp), ix + iw / 2, 31, pal::Bone);
     if (hover({ix, 30, iw, 12}))
-        setTooltip("Health", "Fights cost HP. Leveling up raises max HP and heals you fully.");
+        setTooltip("Health", p.halfLevelHeal ? "Fights cost HP. Leveling up raises max HP and heals half of it."
+                                             : "Fights cost HP. Leveling up raises max HP and heals you fully.");
     // XP
     const int need = balance::xpToNext(p.level);
     bar({ix, 46, iw, 6}, float(p.xp) / float(need), pal::Blue);
@@ -155,43 +156,63 @@ HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot) {
         if (hover({sx, 56, 16, 16})) setTooltip("Key", "Opens this board's chest.");
     }
 
-    float y = 78;
+    float y = 76;
+    // Status effects
+    std::string status;
+    if (p.poison > 0) status += "Poisoned (" + std::to_string(p.poison) + ")  ";
+    if (enc && enc->hexed) status += "Cursed: half XP";
+    if (!status.empty()) {
+        text(status, ix, y, pal::Purple);
+        if (hover({ix, y, iw, 10}))
+            setTooltip("Status", "Poison costs 1 HP per turn (a Potion or rest cures it). A curse halves XP until you "
+                                 "leave this board.");
+        y += 12;
+    }
     text(floorLabel(run, run.current), ix, y, pal::Dim);
     y += 12;
     if (enc) {
         std::string info = "Turn " + std::to_string(enc->turn);
-        if (p.has(RelicId::TenthStep)) info += "   Safe step in " + std::to_string(tenthStepCountdown(*enc));
+        if (p.has(RelicId::TenthStep)) info += "  Safe step in " + std::to_string(tenthStepCountdown(*enc));
         text(info, ix, y, pal::Dim);
         y += 14;
 
         text("MONSTERS", ix, y, pal::Bone);
         y += 12;
+        // Two columns: sprite, power, alive/total. Hover for details.
         const auto alive = enc->board.livingCounts(false);
+        const auto placed = enc->board.totalCounts();
+        int col = 0;
         for (int k = 0; k < kMonsterKinds; ++k) {
-            const int total = enc->params.counts[size_t(k)];
+            const int total = std::max(enc->params.counts[size_t(k)], placed[size_t(k)]);
             if (total == 0) continue;
             const MonsterKind kind = MonsterKind(k);
             const MonsterDef& def = monsterDef(kind);
-            const Rectangle row{ix, y, iw, 16};
-            atlas().draw(monsterSprite(kind), ix, y, monsterColor(kind));
-            text(std::string(def.name).substr(0, 9), ix + 19, y + 4, pal::Bone);
-            text("P" + std::to_string(def.power), ix + 82, y + 4, threatColor(def.power));
-            const std::string cnt = std::to_string(enc->generated ? alive[size_t(k)] : total) + "/" +
-                                    std::to_string(total);
-            text(cnt, ix + iw - float(textWidth(cnt)), y + 4, pal::Dim);
-            if (hover(row)) {
-                std::string body = std::string(def.blurb) + " Adds " + std::to_string(def.power) +
-                                   " to nearby numbers. Attack: -" + std::to_string(def.hitCost) + " HP";
-                if (!def.boss)
-                    body += " (-" + std::to_string(def.hitCost * balance::kAmbushMultiplier) +
-                            " if you stumble into it unmarked).";
-                else
+            const float cx = ix + float(col) * 70;
+            const Rectangle cell{cx, y, 64, 16};
+            atlas().draw(monsterSprite(kind), cx, y, monsterColor(kind));
+            text(std::to_string(def.power), cx + 18, y + 4, threatColor(def.power));
+            const std::string cnt =
+                std::to_string(enc->generated ? alive[size_t(k)] : total) + "/" + std::to_string(total);
+            text(cnt, cx + 62 - float(textWidth(cnt)), y + 4, pal::Dim);
+            if (hover(cell)) {
+                std::string body = std::string(def.blurb) + " Power " + std::to_string(def.power) +
+                                   ". Attack: -" + std::to_string(def.hitCost) + " HP";
+                if (def.boss) {
                     body += " per hit, " + std::to_string(def.hits) + " hits.";
+                } else if (def.ambushDamage > 0) {
+                    body += " (-" + std::to_string(def.ambushDamage) + " if it goes off unmarked).";
+                } else {
+                    body += " (-" + std::to_string(def.hitCost * balance::kAmbushMultiplier) + " if unmarked).";
+                }
                 body += " +" + std::to_string(def.xp) + " XP per hit.";
                 setTooltip(def.name, body);
             }
-            y += 17;
+            if (++col == 2) {
+                col = 0;
+                y += 17;
+            }
         }
+        if (col != 0) y += 17;
         y += 4;
     } else {
         y += 4;
@@ -228,8 +249,11 @@ HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot) {
         }
     }
     y += 34;
+    res.bottom = y;
 
-    text("Seed " + std::to_string(run.seed), ix, 342, pal::Line);
+    std::string footer = "Seed " + std::to_string(run.seed);
+    if (run.heat > 0) footer += "  Heat " + std::to_string(run.heat);
+    text(footer, ix, 342, run.heat > 0 ? pal::Orange : pal::Line);
     return res;
 }
 

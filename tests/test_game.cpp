@@ -30,12 +30,12 @@ TEST_CASE("generated boards never need a guess once hints are revealed") {
     int boardsWithHints = 0;
     int total = 0;
     for (int depth = 0; depth < 7; ++depth) {
-        for (int elite = 0; elite < 2; ++elite) {
-            const auto params = balance::floorParams(depth, elite == 1, false);
-            for (uint64_t seed = 1; seed <= 25; ++seed) {
+        for (int mod = 0; mod < kModifierKinds; ++mod) {
+            const auto params = balance::floorParams(depth, mod % 2 == 1, false, MonsterKind::Burrower, Modifier(mod));
+            for (uint64_t seed = 1; seed <= 8; ++seed) {
                 Rng pick(seed * 31 + uint64_t(depth));
                 const Pos first{pick.range(0, params.width - 1), pick.range(0, params.height - 1)};
-                const GeneratedBoard g = generateBoard(params, first, 1, seed * 977 + uint64_t(depth));
+                const GeneratedBoard g = generateBoard(params, first, 1, seed * 977 + uint64_t(depth * 10 + mod));
                 Rng rng(seed);
                 const Board start = withHintsRevealed(g, first);
                 CHECK(simulateNoGuess(start, first, rng).empty());
@@ -46,7 +46,58 @@ TEST_CASE("generated boards never need a guess once hints are revealed") {
             }
         }
     }
+    for (int b = 0; b < 3; ++b) {
+        const auto params = balance::floorParams(7, false, true, balance::bossKindFor(b));
+        for (uint64_t seed = 1; seed <= 10; ++seed) {
+            const GeneratedBoard g = generateBoard(params, {0, 0}, 1, seed);
+            Rng rng(seed);
+            CHECK(simulateNoGuess(withHintsRevealed(g, {0, 0}), {0, 0}, rng).empty());
+            boardsWithHints += !g.hints.empty();
+            ++total;
+        }
+    }
     MESSAGE("boards needing hint tiles: " << boardsWithHints << " / " << total);
+}
+
+TEST_CASE("topologies: wrap and hex neighbours") {
+    Board wrap(5, 4, Topology::Wrap);
+    Pos n[8];
+    CHECK(wrap.neighbors({0, 0}, n) == 8);
+    bool touchesFarCorner = false;
+    for (int i = 0; i < 8; ++i) touchesFarCorner = touchesFarCorner || n[i] == Pos{4, 3};
+    CHECK(touchesFarCorner);
+
+    Board hex(5, 5, Topology::Hex);
+    CHECK(hex.neighbors({2, 2}, n) == 6);
+    CHECK(hex.neighbors({2, 1}, n) == 6);
+    CHECK(hex.neighbors({0, 0}, n) == 2);
+    // Neighbourhood is symmetric.
+    for (int y = 0; y < 5; ++y)
+        for (int x = 0; x < 5; ++x) {
+            const int k = hex.neighbors({x, y}, n);
+            for (int i = 0; i < k; ++i) {
+                Pos back[8];
+                const int kb = hex.neighbors(n[i], back);
+                bool found = false;
+                for (int j = 0; j < kb; ++j) found = found || back[j] == Pos{x, y};
+                CHECK(found);
+            }
+        }
+}
+
+TEST_CASE("fog shows ranges and liars are flagged; the solver stays sound") {
+    Board b(3, 1);
+    b.addMonster(MonsterKind::Skeleton, {{2, 0}});
+    b.at({1, 0}).revealed = true;
+    b.fogged = true;
+    const NumberView v = b.view({1, 0});
+    CHECK(v.lo == 1);
+    CHECK(v.hi == 3);
+    CHECK_FALSE(v.exact());
+    b.at({1, 0}).liar = true;
+    b.at({1, 0}).liarOffset = 1;
+    CHECK(b.view({1, 0}).liar);
+    CHECK(b.view({1, 0}).shown == 4);
 }
 
 TEST_CASE("boss board places a visible 2x2 Burrower") {
@@ -246,18 +297,21 @@ TEST_CASE("the Burrower re-covers a number every few turns, and digging restores
 }
 
 // Slow: run with `flagd_tests --no-skip -tc="stress*"`.
-TEST_CASE("stress: 1000 boards per floor tier stay guess-free" * doctest::skip()) {
+TEST_CASE("stress: 7000 boards across every floor tier and twist stay guess-free" * doctest::skip()) {
     int hinted = 0;
-    for (int depth = 0; depth < 7; ++depth) {
-        const auto params = balance::floorParams(depth, false, false);
-        for (uint64_t seed = 1; seed <= 1000; ++seed) {
-            Rng pick(seed);
-            const Pos first{pick.range(0, params.width - 1), pick.range(0, params.height - 1)};
-            const GeneratedBoard g = generateBoard(params, first, 1, seed * 31337 + uint64_t(depth));
-            Rng rng(seed);
-            CHECK(simulateNoGuess(withHintsRevealed(g, first), first, rng).empty());
-            hinted += !g.hints.empty();
+    int total = 0;
+    for (int depth = 0; depth < 7; ++depth)
+        for (int mod = 0; mod < kModifierKinds; ++mod) {
+            const auto params = balance::floorParams(depth, false, false, MonsterKind::Burrower, Modifier(mod));
+            for (uint64_t seed = 1; seed <= 200; ++seed) {
+                Rng pick(seed);
+                const Pos first{pick.range(0, params.width - 1), pick.range(0, params.height - 1)};
+                const GeneratedBoard g = generateBoard(params, first, 1, seed * 31337 + uint64_t(depth * 10 + mod));
+                Rng rng(seed);
+                CHECK(simulateNoGuess(withHintsRevealed(g, first), first, rng).empty());
+                hinted += !g.hints.empty();
+                ++total;
+            }
         }
-    }
-    MESSAGE("boards needing hint tiles: " << hinted << " / 7000");
+    MESSAGE("boards needing hint tiles: " << hinted << " / " << total);
 }

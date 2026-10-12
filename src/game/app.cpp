@@ -2,7 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
+#include "game/audio.h"
 #include "game/render/atlas.h"
 #include "game/render/ui.h"
 #include "game/scenes/scenes.h"
@@ -16,11 +21,44 @@ void App::toTitle() {
 
 void App::toMap() { go(std::make_unique<MapScene>()); }
 
-void App::toEnd() { go(std::make_unique<EndScene>()); }
+void App::toEnd() {
+    if (game && !runBanked_) {
+        lastResult = recordRun(meta, *game);
+        runBanked_ = true;
+        saveProgress();
+    }
+    go(std::make_unique<EndScene>());
+}
 
-void App::startRun(uint64_t seed) {
-    game = newRun(seed, ClassId::Warrior);
+void App::startRun(uint64_t seed, ClassId cls, int heat) {
+    game = flagd::startRun(meta, seed, cls, heat);
+    runBanked_ = false;
+    lastResult = {};
     toMap();
+}
+
+std::string App::savePath() const {
+    if (!shotDir_.empty()) return shotDir_ + "/save.txt";
+    const char* appData = std::getenv("APPDATA");
+    const std::filesystem::path dir =
+        appData ? std::filesystem::path(appData) / "Flagd" : std::filesystem::path(GetApplicationDirectory());
+    return (dir / "save.txt").string();
+}
+
+void App::loadProgress() {
+    std::ifstream in(savePath());
+    if (!in) return;
+    std::stringstream text;
+    text << in.rdbuf();
+    if (!loadMeta(text.str(), meta)) TraceLog(LOG_WARNING, "Flagd: could not read save file, starting fresh");
+}
+
+void App::saveProgress() {
+    const std::filesystem::path path = savePath();
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path);
+    out << saveMeta(meta);
 }
 
 void App::enterNode(int nodeId) {
@@ -32,6 +70,7 @@ void App::enterNode(int nodeId) {
         case NodeType::Shop: go(std::make_unique<ShopScene>(*this, nodeId)); break;
         case NodeType::Rest: go(std::make_unique<RestScene>()); break;
         case NodeType::Treasure: go(std::make_unique<TreasureScene>(*this, nodeId)); break;
+        case NodeType::Event: go(std::make_unique<EventScene>(nodeId)); break;
     }
 }
 
@@ -54,6 +93,8 @@ int App::loop() {
         TraceLog(LOG_WARNING, "Flagd: sprite sheet missing, using placeholders");
     }
 
+    audio::init();
+    loadProgress();
     canvas_ = LoadRenderTexture(ui::kCanvasW, ui::kCanvasH);
     SetTextureFilter(canvas_.texture, TEXTURE_FILTER_POINT);
     scene_ = std::make_unique<TitleScene>();
@@ -62,6 +103,7 @@ int App::loop() {
     while (!WindowShouldClose() && !quit_) {
         if (pending_) scene_ = std::move(pending_);
         if (IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();
+        if (IsKeyPressed(KEY_M)) audio::toggleMute();
 
         // Map the real mouse onto the integer-scaled canvas.
         const float sw = float(GetScreenWidth());
@@ -119,6 +161,7 @@ int App::loop() {
     pending_.reset();
     UnloadRenderTexture(canvas_);
     atlas().unload();
+    audio::shutdown();
     CloseWindow();
     return 0;
 }

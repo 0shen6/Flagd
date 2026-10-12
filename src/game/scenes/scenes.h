@@ -10,13 +10,42 @@ namespace flagd {
 
 class TitleScene : public Scene {
 public:
-    TitleScene();
     void update(App& app, float dt) override;
     void draw(App& app) override;
 
 private:
+    float time_ = 0;
+};
+
+class ClassSelectScene : public Scene {
+public:
+    explicit ClassSelectScene(App& app);
+    void update(App& app, float dt) override;
+    void draw(App& app) override;
+
+private:
+    ClassId cls_ = ClassId::Warrior;
+    int heat_ = 0;
     std::string seedText_;
     float time_ = 0;
+};
+
+class CampScene : public Scene {
+public:
+    void update(App& app, float dt) override;
+    void draw(App& app) override;
+
+private:
+    std::string note_;
+};
+
+class CodexScene : public Scene {
+public:
+    void update(App& app, float dt) override;
+    void draw(App& app) override;
+
+private:
+    int tab_ = 0;
 };
 
 class MapScene : public Scene {
@@ -51,7 +80,7 @@ private:
     void react(App& app, const std::vector<Event>& events);
     void say(const std::string& msg, Color c);
     void floatAt(Pos p, const std::string& s, Color c);
-    void drawCell(Pos p, bool hovered);
+    void drawCell(Pos p, bool hovered, bool seer);
     void drawHoverInfo();
 
     int nodeId_;
@@ -98,6 +127,17 @@ public:
 
 private:
     TreasureLoot loot_;
+};
+
+class EventScene : public Scene {
+public:
+    explicit EventScene(int nodeId) : nodeId_(nodeId) {}
+    void update(App& app, float dt) override;
+    void draw(App& app) override;
+
+private:
+    int nodeId_;
+    std::string outcome_;
 };
 
 class EndScene : public Scene {

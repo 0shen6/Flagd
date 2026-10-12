@@ -15,6 +15,7 @@ const char* nodeTypeName(NodeType t) {
         case NodeType::Shop: return "Shop";
         case NodeType::Rest: return "Rest Site";
         case NodeType::Treasure: return "Treasure";
+        case NodeType::Event: return "Event";
         case NodeType::Boss: return "Boss";
     }
     return "?";
@@ -42,11 +43,12 @@ namespace {
 NodeType rollType(int layer, Rng& rng) {
     struct Weight { NodeType t; int w; int minLayer; };
     static constexpr Weight kWeights[] = {
-        {NodeType::Normal, 46, 0},
-        {NodeType::Elite, 16, 2},
-        {NodeType::Shop, 14, 1},
-        {NodeType::Rest, 10, 3},
-        {NodeType::Treasure, 14, 1},
+        {NodeType::Normal, 40, 0},
+        {NodeType::Elite, 15, 2},
+        {NodeType::Shop, 12, 1},
+        {NodeType::Rest, 9, 3},
+        {NodeType::Treasure, 10, 1},
+        {NodeType::Event, 14, 1},
     };
     int total = 0;
     for (const auto& w : kWeights)
@@ -67,10 +69,11 @@ void link(Map& m, int from, int to) {
 
 } // namespace
 
-Map generateMap(uint64_t seed) {
+Map generateMap(uint64_t seed, int heat) {
     Rng rng(deriveSeed(seed, 0x3A9));
     Map m;
     m.layers = balance::kMapLayers;
+    m.bossKind = balance::bossKindFor(int(deriveSeed(seed, 0xB055) % 3));
     const int bossLayer = m.layers - 1;
 
     for (int l = 0; l < bossLayer; ++l) {
@@ -92,6 +95,13 @@ Map generateMap(uint64_t seed) {
         }
         // Every non-rest layer offers at least one board, so XP stays available.
         if (!hasBoard && l != bossLayer - 1) m.nodes.back().type = NodeType::Normal;
+    }
+    // Board twists: from floor 3, likelier on elites; everywhere at heat 4+.
+    for (MapNode& n : m.nodes) {
+        if (n.type != NodeType::Normal && n.type != NodeType::Elite) continue;
+        double chance = n.layer < 2 ? 0.0 : n.type == NodeType::Elite ? 0.6 : 0.3;
+        if (heat >= 4 && n.layer >= 1) chance = 1.0;
+        if (rng.chance(chance)) n.modifier = Modifier(rng.range(1, kModifierKinds - 1));
     }
     MapNode boss;
     boss.layer = bossLayer;

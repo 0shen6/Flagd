@@ -17,7 +17,8 @@ include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(raylib
-  URL https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz)
+  URL https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(raylib)
 
 # ---- Core game logic (no raylib) -------------------------------------------
@@ -28,6 +29,7 @@ add_library(flagd_core STATIC
   src/core/game_state.cpp
   src/core/map.cpp
   src/core/run.cpp
+  src/core/meta.cpp
   src/core/content/content.cpp
 )
 target_include_directories(flagd_core PUBLIC src)
@@ -37,12 +39,14 @@ target_compile_options(flagd_core PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(flagd
   src/game/main.cpp
   src/game/app.cpp
+  src/game/audio.cpp
   src/game/render/atlas.cpp
   src/game/render/ui.cpp
   src/game/scenes/title_scene.cpp
   src/game/scenes/map_scene.cpp
   src/game/scenes/board_scene.cpp
   src/game/scenes/room_scenes.cpp
+  src/game/scenes/meta_scenes.cpp
 )
 target_link_libraries(flagd PRIVATE flagd_core raylib)
 target_compile_options(flagd PRIVATE -Wall -Wextra)
@@ -64,7 +68,8 @@ add_custom_command(TARGET flagd POST_BUILD
 # ---- Tests -------------------------------------------------------------------
 if(FLAGD_BUILD_TESTS)
   FetchContent_Declare(doctest
-    URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.12.tar.gz)
+    URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.12.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(doctest)
   enable_testing()
   add_executable(flagd_tests
@@ -74,6 +79,7 @@ if(FLAGD_BUILD_TESTS)
     tests/test_game.cpp
     tests/test_map.cpp
     tests/test_balance.cpp
+    tests/test_meta.cpp
   )
   target_link_libraries(flagd_tests PRIVATE flagd_core doctest::doctest)
   if(MINGW)

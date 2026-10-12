@@ -10,7 +10,14 @@ Spr monsterSprite(MonsterKind k) {
         case MonsterKind::Bat: return {26, 8};
         case MonsterKind::Skeleton: return {29, 6};
         case MonsterKind::Spider: return {28, 5};
+        case MonsterKind::Keg: return {45, 9};
+        case MonsterKind::Toad: return {25, 8};
+        case MonsterKind::Idol: return {31, 6};
+        case MonsterKind::Golem: return {30, 6};
+        case MonsterKind::Wisp: return {27, 8};
         case MonsterKind::Burrower: return {31, 8};
+        case MonsterKind::FogWyrm: return {29, 8};
+        case MonsterKind::HiveMother: return {26, 5};
         case MonsterKind::Count: break;
     }
     return spr::Skull;
@@ -22,7 +29,14 @@ Color monsterColor(MonsterKind k) {
         case MonsterKind::Bat: return pal::Blue;
         case MonsterKind::Skeleton: return pal::Bone;
         case MonsterKind::Spider: return pal::Red;
+        case MonsterKind::Keg: return pal::Orange;
+        case MonsterKind::Toad: return pal::Green;
+        case MonsterKind::Idol: return pal::Purple;
+        case MonsterKind::Golem: return pal::Brown;
+        case MonsterKind::Wisp: return pal::Blue;
         case MonsterKind::Burrower: return pal::Gold;
+        case MonsterKind::FogWyrm: return pal::Bone;
+        case MonsterKind::HiveMother: return pal::Gold;
         case MonsterKind::Count: break;
     }
     return WHITE;
@@ -49,6 +63,11 @@ Spr relicSprite(RelicId id) {
         case RelicId::WideChord: return {44, 6};
         case RelicId::ThickSkin: return {37, 1};
         case RelicId::CoinMagnet: return {44, 12};
+        case RelicId::GasMask: return {38, 12};
+        case RelicId::HolyWater: return {39, 11};
+        case RelicId::BlastWard: return {37, 3};
+        case RelicId::VampireFang: return {32, 12};
+        case RelicId::Lantern: return {39, 4};
         case RelicId::Count: break;
     }
     return spr::Skull;
@@ -61,6 +80,7 @@ Spr nodeSprite(NodeType t) {
         case NodeType::Shop: return {35, 16};
         case NodeType::Rest: return {14, 10};
         case NodeType::Treasure: return {8, 6};
+        case NodeType::Event: return {37, 13};
         case NodeType::Boss: return {31, 8};
     }
     return spr::Skull;
@@ -73,6 +93,7 @@ Color nodeColor(NodeType t) {
         case NodeType::Shop: return pal::Gold;
         case NodeType::Rest: return pal::Orange;
         case NodeType::Treasure: return pal::Brown;
+        case NodeType::Event: return pal::Blue;
         case NodeType::Boss: return pal::Gold;
     }
     return WHITE;

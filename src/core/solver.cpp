@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <set>
 #include <unordered_map>
 
 namespace flagd {
@@ -13,8 +14,11 @@ namespace {
 // lane stays <= its census count.
 using Usage = uint32_t;
 
+// The hidden neighbours of a known number must sum into [lo, hi]
+// (lo == hi unless the number is fogged).
 struct Constraint {
-    int target = 0;
+    int lo = 0;
+    int hi = 0;
     std::vector<int> vars;
 };
 
@@ -101,9 +105,9 @@ public:
 private:
     bool feasible(int v) const {
         for (int c : varCons_[size_t(v)]) {
-            const int t = cons_[size_t(c)].target;
+            const Constraint& con = cons_[size_t(c)];
             const int s = sum_[size_t(c)];
-            if (s > t || s + open_[size_t(c)] * census_.maxPower < t) return false;
+            if (s > con.hi || s + open_[size_t(c)] * census_.maxPower < con.lo) return false;
         }
         return true;
     }
@@ -163,9 +167,116 @@ private:
     bool outOfBudget_ = false;
 };
 
+// Enumerates a small window of variables against only the constraints lying
+// entirely inside it. Dropping the other constraints is a relaxation, so any
+// deduction made here is sound. Stops as soon as every variable is ambiguous.
+// Returns true only for a complete enumeration: an early stop leaves value
+// sets partial, and intersecting partial sets would be unsound.
+class WindowSearch {
+public:
+    WindowSearch(const std::vector<Constraint>& cons, const std::vector<int>& winCons, const std::vector<int>& winVars,
+                 const Census& census, std::vector<int>& localIndex, long budget)
+        : census_(census), budget_(budget), nVars_(int(winVars.size())) {
+        for (int i = 0; i < nVars_; ++i) localIndex[size_t(winVars[size_t(i)])] = i;
+        varCons_.resize(size_t(nVars_));
+        for (int c : winCons) {
+            Local lc{cons[size_t(c)].lo, cons[size_t(c)].hi, {}};
+            for (int v : cons[size_t(c)].vars) lc.vars.push_back(localIndex[size_t(v)]);
+            for (int v : lc.vars) varCons_[size_t(v)].push_back(int(local_.size()));
+            local_.push_back(std::move(lc));
+        }
+        for (int v : winVars) localIndex[size_t(v)] = -1;
+        sum_.assign(local_.size(), 0);
+        open_.resize(local_.size());
+        for (size_t c = 0; c < local_.size(); ++c) open_[c] = int(local_[c].vars.size());
+        used_.assign(census.powers.size(), 0);
+        value_.assign(size_t(nVars_), 0);
+        masks.assign(size_t(nVars_), 0u);
+    }
+
+    bool run() {
+        recurse(0);
+        return !outOfBudget_ && !allAmbiguous_;
+    }
+
+    std::vector<unsigned> masks;  // by window position
+
+private:
+    struct Local {
+        int lo, hi;
+        std::vector<int> vars;
+    };
+
+    bool feasible(int v) const {
+        for (int c : varCons_[size_t(v)]) {
+            const int s = sum_[size_t(c)];
+            if (s > local_[size_t(c)].hi || s + open_[size_t(c)] * census_.maxPower < local_[size_t(c)].lo) return false;
+        }
+        return true;
+    }
+
+    void apply(int v, int power, int dir) {
+        for (int c : varCons_[size_t(v)]) {
+            sum_[size_t(c)] += power * dir;
+            open_[size_t(c)] -= dir;
+        }
+    }
+
+    void recurse(int i) {
+        if (outOfBudget_ || allAmbiguous_) return;
+        if (--budget_ < 0) {
+            outOfBudget_ = true;
+            return;
+        }
+        if (i == nVars_) {
+            for (int v = 0; v < nVars_; ++v) {
+                const unsigned before = masks[size_t(v)];
+                masks[size_t(v)] |= 1u << unsigned(value_[size_t(v)]);
+                const bool was = (before & 1u) && (before & ~1u);
+                const bool now = (masks[size_t(v)] & 1u) && (masks[size_t(v)] & ~1u);
+                if (now && !was) ++ambiguous_;
+            }
+            allAmbiguous_ = ambiguous_ == nVars_;
+            return;
+        }
+        value_[size_t(i)] = 0;
+        apply(i, 0, 1);
+        if (feasible(i)) recurse(i + 1);
+        apply(i, 0, -1);
+        for (size_t k = 0; k < census_.powers.size(); ++k) {
+            if (used_[k] >= census_.counts[k]) continue;
+            const int pw = census_.powers[k];
+            value_[size_t(i)] = int(k) + 1;
+            ++used_[k];
+            apply(i, pw, 1);
+            if (feasible(i)) recurse(i + 1);
+            apply(i, pw, -1);
+            --used_[k];
+        }
+        value_[size_t(i)] = 0;
+    }
+
+    const Census& census_;
+    long budget_;
+    int nVars_;
+    std::vector<Local> local_;
+    std::vector<std::vector<int>> varCons_;
+    std::vector<int> sum_;
+    std::vector<int> open_;
+    std::vector<int> used_;
+    std::vector<int> value_;
+    int ambiguous_ = 0;
+    bool allAmbiguous_ = false;
+    bool outOfBudget_ = false;
+};
+
+constexpr int kWindowVars = 14;
+constexpr long kWindowBudget = 6000;
+constexpr int kMaxExactVars = 40;
+
 } // namespace
 
-SolverResult solve(const Board& b, long nodeBudget) {
+SolverResult solve(const Board& b, SolveMode mode, long nodeBudget) {
     SolverResult out;
     const int w = b.width();
     const int h = b.height();
@@ -182,7 +293,8 @@ SolverResult solve(const Board& b, long nodeBudget) {
     }
 
     // Variables are hidden cells next to a known number; each known number
-    // (revealed, or buried but remembered) is one sum constraint.
+    // (revealed, or buried but remembered) is one sum constraint. Liar tiles
+    // carry no reliable information and are skipped.
     Grid<int> varIndex(w, h, -1);
     std::vector<Pos> varPos;
     std::vector<Constraint> cons;
@@ -190,12 +302,15 @@ SolverResult solve(const Board& b, long nodeBudget) {
         for (int x = 0; x < w; ++x) {
             const Pos p{x, y};
             const Cell& c = b.at(p);
-            if (!(c.revealed || c.buried)) continue;
+            if (!(c.revealed || c.buried)) continue;  // a Wisp standing on a number does not hide it
+            const NumberView nv = b.view(p);
+            if (nv.liar) continue;
             Constraint con;
-            con.target = b.threatAt(p);
-            int seen[9];
+            con.lo = nv.lo;
+            con.hi = nv.hi;
+            int seen[8];
             int seenCount = 0;
-            forNeighbors(w, h, p, [&](Pos n) {
+            b.forNeighbors(p, [&](Pos n) {
                 if (b.isHidden(n)) {
                     if (varIndex[n] < 0) {
                         varIndex[n] = int(varPos.size());
@@ -210,8 +325,10 @@ SolverResult solve(const Board& b, long nodeBudget) {
                 for (int i = 0; i < seenCount; ++i)
                     if (seen[i] == id) return;
                 seen[seenCount++] = id;
-                con.target -= m->power;
+                con.lo -= m->power;
+                con.hi -= m->power;
             });
+            con.lo = std::max(con.lo, 0);
             if (!con.vars.empty()) cons.push_back(std::move(con));
         }
 
@@ -230,7 +347,74 @@ SolverResult solve(const Board& b, long nodeBudget) {
         }
     }
 
-    // Group variables into components, in BFS order so constraints close early.
+    // Per-variable verdicts: bit 0 = may be safe, bit k+1 = may hold power k.
+    // Every fully enumerated window narrows a variable (AND of verdicts).
+    std::vector<unsigned> verdict(static_cast<size_t>(nVars), ~0u);
+
+    // Stage 1: local windows around each constraint.
+    {
+        std::set<std::vector<int>> done;
+        std::vector<int> localIndex(static_cast<size_t>(nVars), -1);
+        std::vector<char> inWin(static_cast<size_t>(nVars), 0);
+        for (size_t ci = 0; ci < cons.size(); ++ci) {
+            std::vector<int> win = cons[ci].vars;
+            for (int v : win) inWin[size_t(v)] = 1;
+            for (int v : cons[ci].vars)
+                for (int c2 : varCons[size_t(v)]) {
+                    int extra = 0;
+                    for (int u : cons[size_t(c2)].vars) extra += !inWin[size_t(u)];
+                    if (int(win.size()) + extra > kWindowVars) continue;
+                    for (int u : cons[size_t(c2)].vars)
+                        if (!inWin[size_t(u)]) {
+                            inWin[size_t(u)] = 1;
+                            win.push_back(u);
+                        }
+                }
+            std::vector<int> key = win;
+            std::sort(key.begin(), key.end());
+            if (!done.insert(key).second) {
+                for (int v : win) inWin[size_t(v)] = 0;
+                continue;
+            }
+            std::vector<int> winCons;
+            for (int v : win)
+                for (int c2 : varCons[size_t(v)]) {
+                    bool inside = true;
+                    for (int u : cons[size_t(c2)].vars) inside = inside && inWin[size_t(u)];
+                    if (inside && std::find(winCons.begin(), winCons.end(), c2) == winCons.end()) winCons.push_back(c2);
+                }
+            for (int v : win) inWin[size_t(v)] = 0;
+            WindowSearch ws(cons, winCons, win, census, localIndex, kWindowBudget);
+            if (!ws.run()) continue;
+            for (size_t i = 0; i < win.size(); ++i)
+                if (ws.masks[i] != 0u) verdict[size_t(win[i])] &= ws.masks[i];
+        }
+    }
+    auto emit = [&](const std::vector<unsigned>& masks) {
+        for (int v = 0; v < nVars; ++v) {
+            const unsigned m = masks[size_t(v)];
+            if (m == 0u || m == ~0u) continue;  // inconsistent or unknown
+            if (m == 1u) {
+                out.safe.push_back(varPos[size_t(v)]);
+            } else if ((m & 1u) == 0u) {
+                int power = 0;
+                for (size_t k = 0; k < census.powers.size(); ++k)
+                    if (m == (1u << unsigned(k + 1))) power = census.powers[k];
+                out.monsters.push_back(varPos[size_t(v)]);
+                out.monsterPower.push_back(power);
+            }
+        }
+    };
+    if (mode == SolveMode::Fast) {
+        bool any = false;
+        for (unsigned m : verdict) any = any || m == 1u || (m != ~0u && m != 0u && (m & 1u) == 0u);
+        if (any) {
+            emit(verdict);
+            return out;
+        }
+    }
+
+    // Stage 2: group variables into components, in BFS order so constraints close early.
     std::vector<std::vector<int>> comps;
     {
         std::vector<char> visited(static_cast<size_t>(nVars), 0);
@@ -254,7 +438,7 @@ SolverResult solve(const Board& b, long nodeBudget) {
     std::vector<bool> solved(comps.size(), false);
     for (size_t i = 0; i < comps.size(); ++i) {
         searches.emplace_back(cons, comps[i], varCons, census, nodeBudget);
-        solved[i] = searches[i].run();
+        solved[i] = int(comps[i].size()) <= kMaxExactVars && searches[i].run();
     }
 
     // A component's usage is globally feasible if the other components can
@@ -285,19 +469,11 @@ SolverResult solve(const Board& b, long nodeBudget) {
         }
     }
 
-    for (int v = 0; v < nVars; ++v) {
-        const unsigned m = masks[size_t(v)];
-        if (m == 0u) continue;  // unsolved or inconsistent: deduce nothing
-        if (m == 1u) {
-            out.safe.push_back(varPos[size_t(v)]);
-        } else if ((m & 1u) == 0u) {
-            int power = 0;
-            for (size_t k = 0; k < census.powers.size(); ++k)
-                if (m == (1u << unsigned(k + 1))) power = census.powers[k];
-            out.monsters.push_back(varPos[size_t(v)]);
-            out.monsterPower.push_back(power);
-        }
-    }
+    // Combine both stages: solved components are exact, windows can only narrow.
+    for (size_t i = 0; i < comps.size(); ++i)
+        if (solved[i])
+            for (int v : comps[i]) verdict[size_t(v)] &= masks[size_t(v)];
+    emit(verdict);
 
     // Interior cells (no adjacent number) through the global monster count.
     if (exact && interior > 0) {
