@@ -1,0 +1,5 @@
+build/
+.vscode/
+.claude/settings.local.json
+# Unused alternative art pack (kept locally, not part of the game)
+assets/tinydungeon/
