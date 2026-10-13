@@ -27,6 +27,10 @@ constexpr ItemDef kItems[] = {
     {"Flare",   "Show the total threat in a row and column.", 14, true},
     {"Shield",  "The next fight costs no HP.", 18, false},
     {"Potion",  "Restore 5 HP and cure poison.", 16, false},
+    {"Bomb",    "Blast a 3x3 area: monsters inside die (no XP), tiles open. Bosses shrug it off.", 30, true},
+    {"Elixir",  "+2 max HP for the rest of the run.", 30, false},
+    {"Compass", "Reveal where the stairs and the key are on this board.", 18, false},
+    {"Whetstone", "Your next 3 attacks cost 1 less HP.", 20, false},
 };
 static_assert(sizeof(kItems) / sizeof(kItems[0]) == kItemKinds);
 
@@ -38,11 +42,18 @@ constexpr RelicDef kRelics[] = {
     {"Wide Chord",    "Chords also open safe tiles one ring further.", 95, 0},
     {"Thick Skin",    "Take 1 less damage from every fight.", 90, 0},
     {"Coin Magnet",   "+50% gold from tiles.", 70, 0},
+    {"Miser's Purse", "+1 gold for every monster you slay.", 65, 0},
+    {"Scholar's Tome", "+25% XP.", 95, 0},
+    {"Healing Herb",  "Heal 3 HP whenever you leave a board.", 70, 0},
     {"Gas Mask",      "Immune to poison.", 60, 20},
     {"Holy Water",    "Immune to curses.", 60, 20},
     {"Blast Ward",    "Explosions deal no damage.", 70, 25},
     {"Vampire Fang",  "Heal 1 HP whenever you slay a monster of power 3+.", 90, 35},
     {"Lantern",       "Fog never hides numbers.", 80, 30},
+    {"Iron Boots",    "Ambushes cost 1.5x instead of 2x.", 100, 30},
+    {"Second Wind",   "Once per board, a killing blow leaves you at 1 HP.", 110, 40},
+    {"Treasure Sense", "See where each board's chest and key lie.", 60, 25},
+    {"Armor Breaker", "Bosses start with 1 less armor.", 100, 35},
 };
 static_assert(sizeof(kRelics) / sizeof(kRelics[0]) == kRelicKinds);
 

@@ -31,7 +31,7 @@ struct Map {
     int bossId() const;
 };
 
-// Heat 4+ puts a modifier on every board.
-Map generateMap(uint64_t seed, int heat = 0);
+// Heat 4+ puts a modifier on every board. Later acts get twists earlier.
+Map generateMap(uint64_t seed, int heat = 0, int act = 1, MonsterKind boss = MonsterKind::Burrower);
 
 } // namespace flagd

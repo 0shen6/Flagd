@@ -11,8 +11,8 @@ namespace {
 constexpr float kRoomX = 172;
 
 void roomHeader(const std::string& title, const std::string& sub) {
-    ui::text(title, kRoomX, 12, pal::Gold, 20);
-    ui::text(sub, kRoomX, 38, pal::Dim);
+    ui::textFit(title, kRoomX, 12, 460, pal::Gold, 20);
+    ui::textFit(sub, kRoomX, 38, 460, pal::Dim);
 }
 
 bool leaveButton(const char* label = "Leave") {
@@ -37,10 +37,12 @@ void ShopScene::draw(App& app) {
         const Spr icon = o.relic ? relicSprite(RelicId(o.id)) : itemSprite(ItemId(o.id));
         const char* name = o.relic ? relicDef(RelicId(o.id)).name : itemDef(ItemId(o.id)).name;
         const char* desc = o.relic ? relicDef(RelicId(o.id)).desc : itemDef(ItemId(o.id)).desc;
-        atlas().draw(icon, card.x + 8, card.y + 8, o.sold ? pal::Line : o.relic ? pal::Gold : pal::Bone, 2);
-        ui::text(name, card.x + 46, card.y + 10, o.sold ? pal::Dim : pal::Bone);
+        atlas().draw(icon, card.x + 8, card.y + 8,
+                     o.sold ? pal::Line : o.relic ? pal::Gold : (!o.relic && ItemId(o.id) == ItemId::Bomb) ? pal::Red : pal::Bone, 2);
+        ui::textFit(name, card.x + 46, card.y + 10, card.width - 50, o.sold ? pal::Dim : pal::Bone);
         ui::text(o.relic ? "Relic" : "Item", card.x + 46, card.y + 23, pal::Dim);
-        ui::textWrapped(desc, card.x + 8, card.y + 44, card.width - 16, pal::Dim);
+        ui::textWrapped(desc, card.x + 8, card.y + 44, card.width - 16, pal::Dim, 4);
+        if (ui::hover(card)) ui::setTooltip(name, desc);
         const bool canAfford = run.player.gold >= o.price;
         const std::string label = o.sold ? "Sold" : "Buy  " + std::to_string(o.price) + "g";
         if (ui::button({card.x + 8, card.y + 90, card.width - 16, 18}, label, !o.sold && canAfford)) {
@@ -48,9 +50,12 @@ void ShopScene::draw(App& app) {
             else note_ = "Your bag is full.";
         }
     }
-    if (!note_.empty()) ui::text(note_, kRoomX + 136, 326, pal::Gold);
+    if (!note_.empty()) ui::textFit(note_, kRoomX + 136, 326, 320, pal::Gold);
     if (leaveButton()) app.toMap();
-    ui::playerPanel(run, nullptr, -1);
+    {
+        const auto hud = ui::playerPanel(run, nullptr, -1);
+        app.handleHudItems(hud.clickedSlot, hud.discardSlot);
+    }
 }
 
 // ---- Rest site --------------------------------------------------------------
@@ -80,7 +85,10 @@ void RestScene::draw(App& app) {
         ui::textCentered(note_, 350, 170, pal::Green);
     }
     if (leaveButton(done_ ? "Continue" : "Skip")) app.toMap();
-    ui::playerPanel(run, nullptr, -1);
+    {
+        const auto hud = ui::playerPanel(run, nullptr, -1);
+        app.handleHudItems(hud.clickedSlot, hud.discardSlot);
+    }
 }
 
 // ---- Treasure ---------------------------------------------------------------
@@ -96,14 +104,54 @@ void TreasureScene::draw(App& app) {
     if (loot_.hasRelic) {
         const RelicDef& r = relicDef(loot_.relic);
         atlas().draw(relicSprite(loot_.relic), 290, y, pal::Gold, 2);
-        ui::text(r.name, 330, y + 4, pal::Gold);
-        ui::textWrapped(r.desc, 330, y + 18, 200, pal::Bone);
+        ui::textFit(r.name, 330, y + 4, 290, pal::Gold);
+        ui::textWrapped(r.desc, 330, y + 18, 290, pal::Bone, 2);
         y += 50;
     }
     atlas().draw(spr::Coin, 290, y, pal::Gold, 2);
     ui::text("+" + std::to_string(loot_.gold) + " gold", 330, y + 10, pal::Gold);
     if (leaveButton("Continue")) app.toMap();
-    ui::playerPanel(*app.game, nullptr, -1);
+    {
+        const auto hud = ui::playerPanel(*app.game, nullptr, -1);
+        app.handleHudItems(hud.clickedSlot, hud.discardSlot);
+    }
+}
+
+// ---- Boss reward ------------------------------------------------------------
+
+void BossRewardScene::update(App&, float) {}
+
+void BossRewardScene::draw(App& app) {
+    Run& run = *app.game;
+    roomHeader("Act " + std::to_string(run.act) + " cleared!",
+               "Choose a relic from the guardian's hoard. Then the descent continues.");
+    const auto choices = bossRelicChoices(run);
+    bool chosen = false;
+    for (size_t i = 0; i < choices.size() && !chosen; ++i) {
+        const RelicDef& d = relicDef(choices[i]);
+        const Rectangle card{kRoomX + float(i) * 152, 70, 144, 150};
+        ui::panel(card, ui::hover(card) ? pal::PanelHi : pal::Panel, ui::hover(card) ? pal::Gold : pal::Line);
+        atlas().draw(relicSprite(choices[i]), card.x + 56, card.y + 10, pal::Gold, 2);
+        ui::textCentered(ui::fitted(d.name, card.width - 8), card.x + card.width / 2, card.y + 52, pal::Gold);
+        ui::textWrapped(d.desc, card.x + 8, card.y + 70, card.width - 16, pal::Bone, 4);
+        if (ui::button({card.x + 8, card.y + 124, card.width - 16, 20}, "Take")) {
+            run.player.relics.push_back(choices[i]);
+            chosen = true;
+        }
+    }
+    if (choices.empty()) ui::text("The hoard is empty: you own every relic!", kRoomX, 90, pal::Dim);
+    const int healPct = run.heat >= 3 ? balance::kActHealPercent / 2 : balance::kActHealPercent;
+    ui::text("Entering act " + std::to_string(run.act + 1) + " heals " + std::to_string(healPct) + "% of missing HP.",
+             kRoomX, 236, pal::Green);
+    if (!chosen && ui::button({kRoomX, 320, 160, 22}, choices.empty() ? "Continue" : "Skip the relic")) chosen = true;
+    if (chosen) {
+        advanceAct(run);
+        app.toMap();
+    }
+    {
+        const auto hud = ui::playerPanel(run, nullptr, -1);
+        app.handleHudItems(hud.clickedSlot, hud.discardSlot);
+    }
 }
 
 // ---- Event ------------------------------------------------------------------
@@ -116,7 +164,7 @@ void EventScene::draw(App& app) {
     const EventDef& d = eventDef(id);
     roomHeader(d.title, "");
     atlas().draw(spr::Question, 360, 56, pal::Blue, 4);
-    ui::textWrapped(d.text, 220, 130, 300, pal::Bone);
+    ui::textWrapped(d.text, 220, 130, 300, pal::Bone, 4);
     if (outcome_.empty()) {
         for (int o = 0; o < 2; ++o) {
             const bool allowed = eventOptionAllowed(run, id, o);
@@ -124,10 +172,13 @@ void EventScene::draw(App& app) {
                 outcome_ = resolveEvent(run, nodeId_, o);
         }
     } else {
-        ui::textWrapped(outcome_, 220, 186, 300, pal::Gold);
+        ui::textWrapped(outcome_, 220, 186, 300, pal::Gold, 4);
         if (leaveButton("Continue")) app.toMap();
     }
-    ui::playerPanel(run, nullptr, -1);
+    {
+        const auto hud = ui::playerPanel(run, nullptr, -1);
+        app.handleHudItems(hud.clickedSlot, hud.discardSlot);
+    }
 }
 
 // ---- End of run -------------------------------------------------------------

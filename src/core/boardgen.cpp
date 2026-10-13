@@ -42,17 +42,20 @@ Board placeBoard(const balance::FloorParams& params, Pos firstClick, int safeRad
         const MonsterKind kind = MonsterKind(k);
         if (!monsterDef(kind).boss) continue;
         for (int n = 0; n < params.counts[size_t(k)]; ++n) {
+            // Keep the boss clear of the opening, relaxing the gap (never into
+            // the opening itself) until it fits: a run must always have its boss.
             std::vector<Pos> spots;
-            for (int y = 1; y + 2 < h; ++y)
-                for (int x = 1; x + 2 < w; ++x) {
-                    bool ok = true;
-                    for (int dy = 0; dy < 2 && ok; ++dy)
-                        for (int dx = 0; dx < 2 && ok; ++dx) {
-                            Pos c{x + dx, y + dy};
-                            if (taken[idx(c)] || chebyshev(c, firstClick) <= safeRadius + 2) ok = false;
-                        }
-                    if (ok) spots.push_back({x, y});
-                }
+            for (int gap = safeRadius + 2; gap >= 1 && spots.empty(); --gap)
+                for (int y = 1; y + 2 < h; ++y)
+                    for (int x = 1; x + 2 < w; ++x) {
+                        bool ok = true;
+                        for (int dy = 0; dy < 2 && ok; ++dy)
+                            for (int dx = 0; dx < 2 && ok; ++dx) {
+                                Pos c{x + dx, y + dy};
+                                if (taken[idx(c)] || chebyshev(c, firstClick) <= gap) ok = false;
+                            }
+                        if (ok) spots.push_back({x, y});
+                    }
             if (spots.empty()) break;
             const Pos tl = rng.pick(spots);
             std::vector<Pos> cells{tl, {tl.x + 1, tl.y}, {tl.x, tl.y + 1}, {tl.x + 1, tl.y + 1}};

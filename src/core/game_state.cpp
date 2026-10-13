@@ -52,13 +52,53 @@ Encounter makeEncounter(const balance::FloorParams& params, uint64_t seed) {
 }
 
 bool addItem(Player& player, ItemId id) {
-    if (int(player.items.size()) >= balance::kInventorySlots) return false;
+    if (int(player.items.size()) >= player.maxItems) return false;
     player.items.push_back(id);
     return true;
 }
 
+bool usableAnywhere(ItemId id) {
+    return id == ItemId::Potion || id == ItemId::Elixir || id == ItemId::Shield || id == ItemId::Whetstone;
+}
+
+std::string useItemOutside(Player& player, int slot) {
+    if (slot < 0 || slot >= int(player.items.size())) return "";
+    const ItemId id = player.items[size_t(slot)];
+    std::string what;
+    switch (id) {
+        case ItemId::Potion:
+            if (player.hp >= player.maxHp && player.poison == 0) return "";
+            player.hp = std::min(player.maxHp, player.hp + balance::kPotionHeal);
+            player.poison = 0;
+            what = "You drink the Potion.";
+            break;
+        case ItemId::Elixir:
+            player.maxHp += balance::kElixirMaxHp;
+            player.hp += balance::kElixirMaxHp;
+            what = "+" + std::to_string(balance::kElixirMaxHp) + " max HP.";
+            break;
+        case ItemId::Shield:
+            ++player.shield;
+            what = "Shield raised: your next fight costs no HP.";
+            break;
+        case ItemId::Whetstone:
+            player.whetstone += balance::kWhetstoneCharges;
+            what = "Blade sharpened.";
+            break;
+        default:
+            return "";
+    }
+    player.items.erase(player.items.begin() + slot);
+    return what;
+}
+
+void discardItem(Player& player, int slot) {
+    if (slot >= 0 && slot < int(player.items.size())) player.items.erase(player.items.begin() + slot);
+}
+
 void gainXp(Player& player, int amount, std::vector<Event>& events, bool halved) {
     amount = std::max(amount, amount * classDef(player.cls).xpPercent / 100);
+    if (player.has(RelicId::ScholarsTome)) amount += (amount + 3) / 4;
     if (halved) amount /= 2;
     if (amount <= 0) return;
     player.xp += amount;
@@ -99,6 +139,27 @@ int tenthStepCountdown(const Encounter& enc) {
     return balance::kTenthStepEvery - enc.revealClicks % balance::kTenthStepEvery;
 }
 
+int uncoveredPercent(const Board& b) {
+    int safe = 0;
+    int open = 0;
+    for (size_t i = 0; i < b.grid().size(); ++i) {
+        const Pos p = b.grid().posOf(i);
+        if (b.livingMonsterAt(p)) continue;
+        ++safe;
+        open += b.at(p).revealed;
+    }
+    return safe == 0 ? 100 : open * 100 / safe;
+}
+
+int nextArmorBreak(const Encounter& enc) {
+    if (enc.bossArmor <= 0) return 0;
+    // Points break in order at 40%, 70%, 95%; a lower base (Armor Breaker)
+    // simply runs out before the last threshold.
+    const int broken = enc.bossArmorBase - enc.bossArmor;
+    const int n = int(sizeof(balance::kArmorBreaks) / sizeof(balance::kArmorBreaks[0]));
+    return balance::kArmorBreaks[std::clamp(broken, 0, n - 1)];
+}
+
 uint32_t lurkingKinds(const Board& b, Pos p) {
     uint32_t mask = 0;
     b.forNeighbors(p, [&](Pos n) {
@@ -134,10 +195,15 @@ private:
         ev_.push_back({EventType::Gold, p, amount});
     }
 
-    void damage(Pos p, int amount, bool ambush = false) {
+    void damage(Pos p, int amount, int ambush = 0) {
         if (amount <= 0) return;
         pl_.hp -= amount;
-        ev_.push_back({EventType::Damage, p, amount, ambush ? 1 : 0});
+        ev_.push_back({EventType::Damage, p, amount, ambush});
+        if (pl_.hp <= 0 && pl_.has(RelicId::SecondWind) && !enc_.secondWindUsed) {
+            enc_.secondWindUsed = true;
+            pl_.hp = 1;
+            ev_.push_back({EventType::SecondWind, p});
+        }
         if (pl_.hp <= 0) {
             pl_.hp = 0;
             enc_.lost = true;
@@ -180,7 +246,8 @@ private:
     void generate(Pos first) {
         balance::FloorParams params = enc_.params;
         if (pl_.has(RelicId::Lantern)) params.fog = false;
-        const int radius = (pl_.has(RelicId::LuckyStart) ? 2 : 1) + enc_.bonusRadius;
+        int radius = (pl_.has(RelicId::LuckyStart) ? 2 : 1) + enc_.bonusRadius;
+        if (params.boss) radius = std::min(radius, 2);  // leave room for the 2x2 boss
         GeneratedBoard g = generateBoard(params, first, radius, enc_.seed);
         b_ = std::move(g.board);
         enc_.generated = true;
@@ -192,15 +259,54 @@ private:
         for (Pos h : g.hints)
             if (!b_.at(h).revealed) pickUp(b_.revealSafe(h));
         if (!g.hints.empty()) ev_.push_back({EventType::HintsPlaced, first, int(g.hints.size())});
+        if (params.boss) {
+            enc_.bossArmorBase = std::max(0, balance::kBossArmor - (pl_.has(RelicId::ArmorBreaker) ? 1 : 0));
+            enc_.bossArmor = enc_.bossArmorBase;
+            updateArmor();
+        }
+        if (pl_.has(RelicId::TreasureSense)) sense(false);
+    }
+
+    // Marks where the chest and key (and with the Compass, the stairs) are.
+    void sense(bool stairs) {
+        for (size_t i = 0; i < b_.grid().size(); ++i) {
+            Cell& c = b_.at(b_.grid().posOf(i));
+            if (c.feature == Feature::Chest || c.feature == Feature::Key || (stairs && c.feature == Feature::Exit))
+                c.sensed = true;
+        }
+        ev_.push_back({EventType::Sensed});
+    }
+
+    void updateArmor() {
+        if (enc_.bossArmor <= 0) return;
+        const int pct = uncoveredPercent(b_);
+        int armor = enc_.bossArmor;
+        while (armor > 0 && pct >= nextArmorBreakFor(armor)) --armor;
+        if (armor < enc_.bossArmor) {
+            enc_.bossArmor = armor;
+            ev_.push_back({EventType::ArmorBroken, {}, armor});
+        }
+    }
+
+    int nextArmorBreakFor(int armor) const {
+        Encounter probe;
+        probe.bossArmor = armor;
+        probe.bossArmorBase = enc_.bossArmorBase;
+        return nextArmorBreak(probe);
     }
 
     int ambushMultiplier() const {
         return pl_.cls == ClassId::Gambler ? balance::kGamblerAmbushMultiplier : balance::kAmbushMultiplier;
     }
 
-    void fight(int monsterId, Pos p, bool deliberate, bool free) {
+    // Returns false if the attack bounced off boss armor (no turn passes).
+    bool fight(int monsterId, Pos p, bool deliberate, bool free, bool guessedMark = false) {
         Monster& m = b_.monsters()[size_t(monsterId)];
         const MonsterDef& def = monsterDef(m.kind);
+        if (def.boss && enc_.bossArmor > 0) {
+            ev_.push_back({EventType::BossArmored, p, enc_.bossArmor, uncoveredPercent(b_)});
+            return false;
+        }
         const bool flagged = b_.at(p).mark != Mark::None;
         const bool ambush = !deliberate && !free;
         const bool asleep = def.trait == Trait::Dormant && b_.surrounded(p);
@@ -217,16 +323,21 @@ private:
             dmg = (def.trait == Trait::Explosive && pl_.cls == ClassId::Sapper) ? 0 : def.hitCost;
         } else {
             dmg = def.ambushDamage > 0 ? def.ambushDamage : def.hitCost * ambushMultiplier();
+            if (pl_.has(RelicId::IronBoots)) dmg = (dmg * 3 + 3) / 4;
         }
         if (dmg > 0 && pl_.has(RelicId::ThickSkin)) dmg = std::max(0, dmg - 1);
+        if (dmg > 0 && pl_.whetstone > 0 && !ambush) {
+            --pl_.whetstone;
+            --dmg;
+        }
         if (dmg > 0 && pl_.shield > 0) {
             --pl_.shield;
             dmg = 0;
             ev_.push_back({EventType::ShieldBlock, p});
         }
         m.visible = true;
-        damage(p, dmg, ambush);
-        if (!pl_.alive()) return;
+        damage(p, dmg, ambush ? (guessedMark ? 2 : 1) : 0);
+        if (!pl_.alive()) return true;
 
         if (blast) {
             // The keg is gone, no XP; everything around it is laid bare.
@@ -236,7 +347,7 @@ private:
             std::vector<Pos> around;
             b_.forNeighbors(p, [&](Pos n) { around.push_back(n); });
             expose(around);
-            return;
+            return true;
         }
         if (ambush && def.trait == Trait::Poison && !pl_.has(RelicId::GasMask)) {
             pl_.poison = balance::kPoisonTurns;
@@ -249,23 +360,31 @@ private:
         if (asleep) ev_.push_back({EventType::Asleep, p});
 
         --m.hp;
-        if (flagged && !free && pl_.has(RelicId::BountyFlags)) addGold(p, balance::kBountyGold);
+        if (flagged && deliberate && !free && pl_.has(RelicId::BountyFlags)) addGold(p, balance::kBountyGold);
         gainXp(pl_, def.xp, ev_, enc_.hexed);
         if (m.hp > 0) {
             ev_.push_back({EventType::BossHit, p, m.hp});
             if (m.kind == MonsterKind::FogWyrm) liftFogAround(m);
-            return;
+            return true;
         }
+        slay(monsterId, p);
+        if (def.power >= 3 && pl_.has(RelicId::VampireFang)) heal(pl_, 1, ev_);
+        if (def.boss) {
+            enc_.won = true;
+            ev_.push_back({EventType::BossDefeated, p});
+            if (pl_.has(RelicId::HealingHerb)) heal(pl_, balance::kHerbHeal, ev_);
+        }
+        return true;
+    }
+
+    void slay(int monsterId, Pos p) {
+        Monster& m = b_.monsters()[size_t(monsterId)];
         m.alive = false;
         ++pl_.kills;
         ++pl_.killsByKind[size_t(m.kind)];
         ev_.push_back({EventType::Kill, p, 0, int(m.kind)});
-        if (def.power >= 3 && pl_.has(RelicId::VampireFang)) heal(pl_, 1, ev_);
+        if (pl_.has(RelicId::MisersPurse)) addGold(p, 1);
         pickUp(b_.settleAfterKill(monsterId));
-        if (def.boss) {
-            enc_.won = true;
-            ev_.push_back({EventType::BossDefeated, p});
-        }
     }
 
     void liftFogAround(const Monster& m) {
@@ -274,43 +393,51 @@ private:
         ev_.push_back({EventType::FogLifts, m.cells[0]});
     }
 
-    // A click (or chord) on a cell the player cannot see into.
-    void revealHidden(Pos p, bool fromChord) {
+    // A click (or chord) on a cell the player cannot see into. Returns false
+    // if nothing happened (no turn passes).
+    bool revealHidden(Pos p, bool fromChord) {
         Cell& c = b_.at(p);
         if (c.buried) {
             pickUp(b_.revealSafe(p));
-            return;
+            return true;
         }
-        // Gambler: was this a gamble? (Only asked for plain clicks.)
-        bool gamble = false;
-        if (pl_.cls == ClassId::Gambler && !fromChord && c.mark == Mark::None && b_.isHidden(p)) {
-            const SolverResult r = solve(b_);
-            gamble = std::find(r.safe.begin(), r.safe.end(), p) == r.safe.end();
-        }
+        // What could the player prove about this tile before clicking? A mark
+        // only earns the prepared-attack cost if the monster was provable;
+        // marking a guess and clicking it is still an ambush.
+        const bool hiddenNow = b_.isHidden(p);
+        SolverResult proof;
+        const bool needProof = hiddenNow && !fromChord && (c.mark != Mark::None || pl_.cls == ClassId::Gambler);
+        if (needProof) proof = solve(b_);
+        const bool provenMonster =
+            needProof && std::find(proof.monsters.begin(), proof.monsters.end(), p) != proof.monsters.end();
+        const bool provenSafe = needProof && std::find(proof.safe.begin(), proof.safe.end(), p) != proof.safe.end();
+        const bool gamble = pl_.cls == ClassId::Gambler && needProof && c.mark == Mark::None && !provenSafe;
+
         if (Monster* m = b_.livingMonsterAt(p)) {
-            const bool deliberate = m->visible || c.mark != Mark::None;
+            const bool marked = c.mark != Mark::None;
+            const bool deliberate = m->visible || (marked && provenMonster);
             if (!deliberate && !fromChord) {
                 ++enc_.revealClicks;
                 if (pl_.has(RelicId::TenthStep) && enc_.revealClicks % balance::kTenthStepEvery == 0) {
                     m->visible = true;
                     ev_.push_back({EventType::Warded, p});
-                    return;
+                    return true;
                 }
             }
-            fight(c.monster, p, deliberate, false);
-            return;
+            return fight(c.monster, p, deliberate, false, marked && !deliberate);
         }
         if (!fromChord) ++enc_.revealClicks;
         if (c.mark != Mark::None && pl_.has(RelicId::BountyFlags)) {
             ev_.push_back({EventType::WrongFlag, p});
             damage(p, 1);
-            if (!pl_.alive()) return;
+            if (!pl_.alive()) return true;
         }
         pickUp(b_.revealSafe(p));
         if (gamble) {
             ev_.push_back({EventType::Lucky, p});
             heal(pl_, 1, ev_);
         }
+        return true;
     }
 
     // Opens every unmarked hidden neighbour when the marks and visible monsters
@@ -371,7 +498,7 @@ private:
         enc_.hasKey = false;
         b_.at(p).chestOpen = true;
         ev_.push_back({EventType::ChestOpened, p});
-        addGold(p, enc_.rng.range(10, 18) + 2 * enc_.params.depth);
+        addGold(p, enc_.rng.range(5, 10) + enc_.params.depth);
         if (enc_.params.elite || enc_.params.boss) {
             const auto pool = availableRelics(pl_);
             if (pool.empty()) {
@@ -465,6 +592,7 @@ private:
             wander();
             bossActs();
         }
+        updateArmor();
         if (!enc_.cleared && !enc_.params.boss && b_.allSafeRevealed()) {
             enc_.cleared = true;
             const int bonus = balance::clearBonus(enc_.params.depth);
@@ -483,8 +611,7 @@ private:
         }
         Cell& c = b_.at(p);
         if (Monster* m = b_.livingMonsterAt(p); m && m->visible && c.revealed) {
-            fight(c.monster, p, true, false);  // a Wisp standing on open ground
-            endTurn();
+            if (fight(c.monster, p, true, false)) endTurn();  // a Wisp standing on open ground
             return;
         }
         if (c.revealed) {
@@ -493,8 +620,7 @@ private:
             if (chord(p)) endTurn();
             return;
         }
-        revealHidden(p, false);
-        endTurn();
+        if (revealHidden(p, false)) endTurn();
     }
 
     void mark(const Action& a) {
@@ -507,6 +633,7 @@ private:
         if (!enc_.exitFound && !enc_.won) return invalid({});
         enc_.descended = true;
         pl_.poison = 0;
+        if (pl_.has(RelicId::HealingHerb)) heal(pl_, balance::kHerbHeal, ev_);
         ev_.push_back({EventType::Descend});
     }
 
@@ -522,7 +649,7 @@ private:
                 break;
             case ItemId::Defuser:
                 if (b_.livingMonsterAt(p)) {
-                    fight(b_.at(p).monster, p, true, true);
+                    if (!fight(b_.at(p).monster, p, true, true)) return;  // armored boss: keep the item
                 } else if (b_.isHidden(p) || b_.at(p).buried) {
                     pickUp(b_.revealSafe(p));
                 } else {
@@ -543,6 +670,27 @@ private:
                 if (pl_.hp >= pl_.maxHp && pl_.poison == 0) return invalid(p);
                 pl_.poison = 0;
                 heal(pl_, balance::kPotionHeal, ev_);
+                break;
+            case ItemId::Bomb:
+                ev_.push_back({EventType::Explosion, p});
+                for (Pos q : b_.within(p, 1)) {
+                    Monster* m = b_.livingMonsterAt(q);
+                    if (m && monsterDef(m->kind).boss) continue;
+                    if (m) slay(b_.at(q).monster, q);
+                    else if (b_.isHidden(q) || b_.at(q).buried) pickUp(b_.revealSafe(q));
+                }
+                takesTurn = true;
+                break;
+            case ItemId::Elixir:
+                pl_.maxHp += balance::kElixirMaxHp;
+                heal(pl_, balance::kElixirMaxHp, ev_);
+                break;
+            case ItemId::Compass:
+                if (!enc_.generated) return invalid(p);
+                sense(true);
+                break;
+            case ItemId::Whetstone:
+                pl_.whetstone += balance::kWhetstoneCharges;
                 break;
             case ItemId::Count:
                 return invalid(p);

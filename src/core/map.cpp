@@ -69,11 +69,11 @@ void link(Map& m, int from, int to) {
 
 } // namespace
 
-Map generateMap(uint64_t seed, int heat) {
+Map generateMap(uint64_t seed, int heat, int act, MonsterKind bossKind) {
     Rng rng(deriveSeed(seed, 0x3A9));
     Map m;
     m.layers = balance::kMapLayers;
-    m.bossKind = balance::bossKindFor(int(deriveSeed(seed, 0xB055) % 3));
+    m.bossKind = bossKind;
     const int bossLayer = m.layers - 1;
 
     for (int l = 0; l < bossLayer; ++l) {
@@ -96,12 +96,34 @@ Map generateMap(uint64_t seed, int heat) {
         // Every non-rest layer offers at least one board, so XP stays available.
         if (!hasBoard && l != bossLayer - 1) m.nodes.back().type = NodeType::Normal;
     }
-    // Board twists: from floor 3, likelier on elites; everywhere at heat 4+.
-    for (MapNode& n : m.nodes) {
-        if (n.type != NodeType::Normal && n.type != NodeType::Elite) continue;
-        double chance = n.layer < 2 ? 0.0 : n.type == NodeType::Elite ? 0.6 : 0.3;
-        if (heat >= 4 && n.layer >= 1) chance = 1.0;
-        if (rng.chance(chance)) n.modifier = Modifier(rng.range(1, kModifierKinds - 1));
+    // Board twists: from floor 3 in act 1, from the start in later acts, and on
+    // every board at heat 4+. Twist kinds are dealt from a shuffled cycle so a
+    // map shows variety, and every map gets at least two.
+    {
+        const int firstLayer = act == 1 ? (heat >= 4 ? 1 : 2) : 0;
+        std::vector<int> eligible;
+        for (int i = 0; i < int(m.nodes.size()); ++i) {
+            const MapNode& n = m.nodes[size_t(i)];
+            if ((n.type == NodeType::Normal || n.type == NodeType::Elite) && n.layer >= firstLayer)
+                eligible.push_back(i);
+        }
+        std::vector<Modifier> deck{Modifier::Wrap, Modifier::Hex, Modifier::Fog, Modifier::Liars};
+        rng.shuffle(deck);
+        size_t dealt = 0;
+        auto deal = [&](MapNode& n) {
+            n.modifier = deck[dealt++ % deck.size()];
+            if (dealt % deck.size() == 0) rng.shuffle(deck);
+        };
+        for (int i : eligible) {
+            MapNode& n = m.nodes[size_t(i)];
+            const double chance = heat >= 4 ? 1.0 : n.type == NodeType::Elite ? 0.7 : 0.4;
+            if (rng.chance(chance)) deal(n);
+        }
+        rng.shuffle(eligible);
+        for (int i : eligible) {
+            if (dealt >= 2) break;
+            if (m.nodes[size_t(i)].modifier == Modifier::None) deal(m.nodes[size_t(i)]);
+        }
     }
     MapNode boss;
     boss.layer = bossLayer;

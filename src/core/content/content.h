@@ -43,7 +43,7 @@ struct MonsterDef {
     const char* blurb;
 };
 
-enum class ItemId : uint8_t { Scanner, Defuser, Flare, Shield, Potion, Count };
+enum class ItemId : uint8_t { Scanner, Defuser, Flare, Shield, Potion, Bomb, Elixir, Compass, Whetstone, Count };
 
 struct ItemDef {
     const char* name;
@@ -60,12 +60,19 @@ enum class RelicId : uint8_t {
     WideChord,
     ThickSkin,
     CoinMagnet,
+    MisersPurse,
+    ScholarsTome,
+    HealingHerb,
     // Unlocked at the Camp:
     GasMask,
     HolyWater,
     BlastWard,
     VampireFang,
     Lantern,
+    IronBoots,
+    SecondWind,
+    TreasureSense,
+    ArmorBreaker,
     Count
 };
 
@@ -101,6 +108,8 @@ constexpr int kRelicKinds = int(RelicId::Count);
 constexpr int kClassKinds = int(ClassId::Count);
 constexpr int kModifierKinds = int(Modifier::Count);
 constexpr int kMaxHeat = 5;
+constexpr int kActs = 3;
+static_assert(kRelicKinds <= 32, "relic sets are 32-bit masks");
 
 const MonsterDef& monsterDef(MonsterKind k);
 const ItemDef& itemDef(ItemId id);

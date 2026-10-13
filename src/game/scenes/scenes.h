@@ -39,6 +39,12 @@ private:
     std::string note_;
 };
 
+class OptionsScene : public Scene {
+public:
+    void update(App& app, float dt) override;
+    void draw(App& app) override;
+};
+
 class CodexScene : public Scene {
 public:
     void update(App& app, float dt) override;
@@ -52,6 +58,7 @@ class MapScene : public Scene {
 public:
     void update(App& app, float dt) override;
     void draw(App& app) override;
+    bool pausable() const override { return true; }
 
 private:
     Vector2 nodePos(const Run& run, int id) const;
@@ -71,6 +78,8 @@ public:
     BoardScene(App& app, int nodeId);
     void update(App& app, float dt) override;
     void draw(App& app) override;
+    bool pausable() const override { return true; }
+    bool wantsEscape() const override { return selectedSlot_ >= 0 || confirmExit_; }
 
 private:
     Rectangle cellRect(Pos p) const;
@@ -81,7 +90,7 @@ private:
     void say(const std::string& msg, Color c);
     void floatAt(Pos p, const std::string& s, Color c);
     void drawCell(Pos p, bool hovered, bool seer);
-    void drawHoverInfo();
+    void drawHoverInfo(const Player& pl);
 
     int nodeId_;
     Encounter enc_;
@@ -96,6 +105,16 @@ private:
     float logAge_ = 0;
     std::vector<FloatText> floats_;
     std::vector<std::pair<Pos, float>> pulses_;  // recently changed cells
+    std::string popupTitle_;  // first-time explanations (twists, boss armor)
+    std::string popupBody_;
+};
+
+// After an act's boss: pick one of three relics, then on to the next act.
+class BossRewardScene : public Scene {
+public:
+    void update(App& app, float dt) override;
+    void draw(App& app) override;
+    bool pausable() const override { return true; }
 };
 
 class ShopScene : public Scene {
@@ -103,6 +122,7 @@ public:
     ShopScene(App& app, int nodeId);
     void update(App& app, float dt) override;
     void draw(App& app) override;
+    bool pausable() const override { return true; }
 
 private:
     std::vector<ShopOffer> offers_;
@@ -113,6 +133,7 @@ class RestScene : public Scene {
 public:
     void update(App& app, float dt) override;
     void draw(App& app) override;
+    bool pausable() const override { return true; }
 
 private:
     bool done_ = false;
@@ -124,6 +145,7 @@ public:
     TreasureScene(App& app, int nodeId);
     void update(App& app, float dt) override;
     void draw(App& app) override;
+    bool pausable() const override { return true; }
 
 private:
     TreasureLoot loot_;
@@ -134,6 +156,7 @@ public:
     explicit EventScene(int nodeId) : nodeId_(nodeId) {}
     void update(App& app, float dt) override;
     void draw(App& app) override;
+    bool pausable() const override { return true; }
 
 private:
     int nodeId_;

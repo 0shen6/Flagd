@@ -49,8 +49,12 @@ bool clicked(Rectangle r);
 void text(const std::string& s, float x, float y, Color c, int size = 10);
 void textCentered(const std::string& s, float cx, float y, Color c, int size = 10);
 int textWidth(const std::string& s, int size = 10);
-// Word-wraps into maxWidth; returns height used.
-int textWrapped(const std::string& s, float x, float y, float maxWidth, Color c);
+// Word-wraps into maxWidth (at most maxLines lines; the last one is cut with
+// "..." if needed). Returns the height used.
+int textWrapped(const std::string& s, float x, float y, float maxWidth, Color c, int maxLines = 99);
+// One line, cut with "..." to fit maxWidth. Returns true if it was cut.
+bool textFit(const std::string& s, float x, float y, float maxWidth, Color c, int size = 10);
+std::string fitted(const std::string& s, float maxWidth, int size = 10);
 
 void panel(Rectangle r, Color fill = pal::Panel, Color border = pal::Line);
 void bar(Rectangle r, float frac, Color fill, Color back = pal::Floor);
@@ -65,7 +69,8 @@ void drawTooltip();
 // slot sets clickedSlot.
 struct HudResult {
     int clickedSlot = -1;
-    float bottom = 0;  // y just below the items
+    int discardSlot = -1;  // right-clicked twice
+    float bottom = 0;      // y just below the items
 };
 HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot);
 

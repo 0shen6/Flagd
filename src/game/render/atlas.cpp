@@ -49,6 +49,10 @@ Spr itemSprite(ItemId id) {
         case ItemId::Flare: return {28, 11};
         case ItemId::Shield: return {37, 3};
         case ItemId::Potion: return {33, 13};
+        case ItemId::Bomb: return {45, 9};
+        case ItemId::Elixir: return {34, 14};
+        case ItemId::Compass: return {33, 15};
+        case ItemId::Whetstone: return {33, 7};
         case ItemId::Count: break;
     }
     return spr::Skull;
@@ -68,6 +72,13 @@ Spr relicSprite(RelicId id) {
         case RelicId::BlastWard: return {37, 3};
         case RelicId::VampireFang: return {32, 12};
         case RelicId::Lantern: return {39, 4};
+        case RelicId::MisersPurse: return {47, 4};
+        case RelicId::ScholarsTome: return {34, 15};
+        case RelicId::HealingHerb: return {6, 0};
+        case RelicId::IronBoots: return {40, 1};
+        case RelicId::SecondWind: return {39, 10};
+        case RelicId::TreasureSense: return {34, 11};
+        case RelicId::ArmorBreaker: return {37, 7};
         case RelicId::Count: break;
     }
     return spr::Skull;

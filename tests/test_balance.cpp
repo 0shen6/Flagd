@@ -21,6 +21,11 @@ struct BotStats {
     long levelAtBoss = 0;
     int reachedBoss = 0;
     std::map<int, std::pair<int, int>> byBoss;  // boss kind -> (wins, fights)
+    // Economy: what the bot can afford when it walks into a shop.
+    int shopVisits = 0;
+    long goldAtShop = 0;
+    long shopTotal = 0;   // price of everything on offer
+    long goldEarned = 0;
 };
 
 Mark markFor(int power) {
@@ -83,7 +88,8 @@ void playBoard(Player& pl, Encounter& enc, bool marks) {
             consider(r.monsters[i], power, r.monsterPower[i] ? power : 1);
         }
         for (const Monster& m : b.monsters())
-            if (m.alive && m.visible) consider(m.cells[0], monsterDef(m.kind).hitCost, monsterDef(m.kind).xp);
+            if (m.alive && m.visible && !(monsterDef(m.kind).boss && enc.bossArmor > 0))
+                consider(m.cells[0], monsterDef(m.kind).hitCost, monsterDef(m.kind).xp);
         auto slotOf = [&](ItemId id) {
             auto it = std::find(pl.items.begin(), pl.items.end(), id);
             return it == pl.items.end() ? -1 : int(it - pl.items.begin());
@@ -109,6 +115,15 @@ void playBoard(Player& pl, Encounter& enc, bool marks) {
                 applyAction(pl, enc, {ActionType::SetMark, target, markFor(power)});
             }
             applyAction(pl, enc, {ActionType::Reveal, target});
+            continue;
+        }
+        // Dig up anything the Burrower buried (known safe; it counts toward armor).
+        Pos buried{-1, -1};
+        for (int y = 0; y < b.height() && buried.x < 0; ++y)
+            for (int x = 0; x < b.width() && buried.x < 0; ++x)
+                if (b.at({x, y}).buried) buried = {x, y};
+        if (buried.x >= 0) {
+            applyAction(pl, enc, {ActionType::Reveal, buried});
             continue;
         }
         if (enc.exitFound) {
@@ -151,6 +166,11 @@ bool playRun(uint64_t seed, BotStats& st, bool marks, ClassId cls = ClassId::War
     run.player.relicPool = (1u << kRelicKinds) - 1;
     Rng rng(seed ^ 0xB07);
     while (!run.over) {
+        if (run.actCleared) {
+            const auto relics = bossRelicChoices(run);
+            if (!relics.empty()) run.player.relics.push_back(relics[0]);
+            advanceAct(run);
+        }
         const auto choices = run.choices();
         REQUIRE_FALSE(choices.empty());
         // Prefer fights when healthy, recovery when hurt.
@@ -183,6 +203,7 @@ bool playRun(uint64_t seed, BotStats& st, bool marks, ClassId cls = ClassId::War
             }
             Encounter enc = beginEncounter(run, pick);
             playBoard(run.player, enc, marks);
+            if (n.type == NodeType::Boss && enc.won) ++st.byBoss[int(run.map.bossKind)].first;
             REQUIRE((enc.lost || enc.won || enc.descended));
             finishBoard(run, enc);
             if (enc.lost) ++st.deathsByLayer[n.layer];
@@ -191,6 +212,12 @@ bool playRun(uint64_t seed, BotStats& st, bool marks, ClassId cls = ClassId::War
             else restFortify(run.player);
         } else if (n.type == NodeType::Shop) {
             auto offers = makeShop(run, pick);
+            ++st.shopVisits;
+            st.goldAtShop += run.player.gold;
+            for (const auto& o : offers) st.shopTotal += o.price;
+            // Buy relics first (they matter most), then items.
+            for (auto& o : offers)
+                if (o.relic) buy(run, o);
             for (auto& o : offers) buy(run, o);
         } else if (n.type == NodeType::Treasure) {
             takeTreasure(run, pick);
@@ -201,7 +228,7 @@ bool playRun(uint64_t seed, BotStats& st, bool marks, ClassId cls = ClassId::War
     }
     ++st.runs;
     st.wins += run.victory;
-    if (run.victory) ++st.byBoss[int(run.map.bossKind)].first;
+    st.goldEarned += run.player.goldEarned;
     return run.victory;
 }
 
@@ -209,7 +236,9 @@ std::string report(const BotStats& st) {
     std::string deaths;
     for (const auto& [layer, n] : st.deathsByLayer) deaths += " F" + std::to_string(layer + 1) + ":" + std::to_string(n);
     return "wins " + std::to_string(st.wins) + "/" + std::to_string(st.runs) + ", deaths by floor:" + deaths +
-           ", avg level at boss " +
+           ", gold/run " + std::to_string(st.goldEarned / std::max(1, st.runs)) + ", at shop " +
+           std::to_string(st.goldAtShop / std::max(1, st.shopVisits)) + "g vs stock " +
+           std::to_string(st.shopTotal / std::max(1, st.shopVisits)) + "g" + ", avg level at boss " +
            std::to_string(st.reachedBoss ? double(st.levelAtBoss) / st.reachedBoss : 0.0).substr(0, 4) + ", bosses:" +
            [&] {
                std::string b;
@@ -233,8 +262,9 @@ TEST_CASE("autoplay: runs always finish; careful play beats sloppy play") {
     MESSAGE("sloppy bot (never marks):     " << report(sloppy));
     CHECK(careful.runs == 60);
     CHECK(sloppy.runs == 60);
-    // A perfect deducer should win most runs; skipping marks should hurt.
-    CHECK(careful.wins >= careful.runs / 2);
+    // A perfect deducer should win a fair share (the game is meant to be hard);
+    // skipping marks should hurt a lot.
+    CHECK(careful.wins >= careful.runs / 4);
     CHECK(careful.wins > sloppy.wins);
 }
 

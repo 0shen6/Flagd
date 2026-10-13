@@ -52,8 +52,27 @@ void textCentered(const std::string& s, float cx, float y, Color c, int size) {
 
 int textWidth(const std::string& s, int size) { return MeasureText(s.c_str(), size); }
 
-int textWrapped(const std::string& s, float x, float y, float maxWidth, Color c) {
-    const auto lines = wrap(s, maxWidth);
+std::string fitted(const std::string& s, float maxWidth, int size) {
+    if (float(textWidth(s, size)) <= maxWidth) return s;
+    std::string cut = s;
+    while (!cut.empty() && float(textWidth(cut + "...", size)) > maxWidth) cut.pop_back();
+    return cut + "...";
+}
+
+bool textFit(const std::string& s, float x, float y, float maxWidth, Color c, int size) {
+    const std::string f = fitted(s, maxWidth, size);
+    text(f, x, y, c, size);
+    return f.size() != s.size();
+}
+
+int textWrapped(const std::string& s, float x, float y, float maxWidth, Color c, int maxLines) {
+    auto lines = wrap(s, maxWidth);
+    if (int(lines.size()) > maxLines) {
+        std::string rest;
+        for (size_t i = size_t(maxLines) - 1; i < lines.size(); ++i) rest += (rest.empty() ? "" : " ") + lines[i];
+        lines.resize(size_t(maxLines));
+        lines.back() = fitted(rest, maxWidth);
+    }
     for (size_t i = 0; i < lines.size(); ++i) text(lines[i], x, y + float(i) * 11.0f, c);
     return int(lines.size()) * 11;
 }
@@ -108,9 +127,10 @@ void drawTooltip() {
 }
 
 std::string floorLabel(const Run& run, int nodeId) {
-    if (nodeId < 0) return "The Descent";
+    const std::string act = "Act " + std::to_string(run.act) + "  ";
+    if (nodeId < 0) return act + "The Descent";
     const MapNode& n = run.node(nodeId);
-    return "Floor " + std::to_string(n.layer + 1) + "/" + std::to_string(run.map.layers) + "  " +
+    return act + "Floor " + std::to_string(n.layer + 1) + "/" + std::to_string(run.map.layers) + "  " +
            nodeTypeName(n.type);
 }
 
@@ -160,20 +180,21 @@ HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot) {
     // Status effects
     std::string status;
     if (p.poison > 0) status += "Poisoned (" + std::to_string(p.poison) + ")  ";
-    if (enc && enc->hexed) status += "Cursed: half XP";
+    if (enc && enc->hexed) status += "Cursed  ";
+    if (p.whetstone > 0) status += "Sharp x" + std::to_string(p.whetstone);
     if (!status.empty()) {
-        text(status, ix, y, pal::Purple);
+        textFit(status, ix, y, iw, pal::Purple);
         if (hover({ix, y, iw, 10}))
             setTooltip("Status", "Poison costs 1 HP per turn (a Potion or rest cures it). A curse halves XP until you "
-                                 "leave this board.");
+                                 "leave this board. Sharp: your next attacks cost 1 less HP (Whetstone).");
         y += 12;
     }
-    text(floorLabel(run, run.current), ix, y, pal::Dim);
+    textFit(floorLabel(run, run.current), ix, y, iw, pal::Dim);
     y += 12;
     if (enc) {
         std::string info = "Turn " + std::to_string(enc->turn);
         if (p.has(RelicId::TenthStep)) info += "  Safe step in " + std::to_string(tenthStepCountdown(*enc));
-        text(info, ix, y, pal::Dim);
+        textFit(info, ix, y, iw, pal::Dim);
         y += 14;
 
         text("MONSTERS", ix, y, pal::Bone);
@@ -218,36 +239,77 @@ HudResult playerPanel(const Run& run, const Encounter* enc, int selectedSlot) {
         y += 4;
     }
 
-    text("RELICS", ix, y, pal::Bone);
+    // Relics fill whatever space is left above the items (8 per row). When
+    // there are more than fit, the last cell shows "+N" and lists the rest.
+    constexpr float kItemsTop = 296;
+    text("RELICS " + std::to_string(p.relics.size()), ix, y, pal::Bone);
     y += 12;
     if (p.relics.empty()) text("none yet", ix, y + 3, pal::Dim);
-    for (size_t i = 0; i < p.relics.size(); ++i) {
-        const float rx = ix + float(i % 7) * 19;
-        const float ry = y + float(i / 7) * 18;
-        atlas().draw(relicSprite(p.relics[i]), rx, ry, pal::Gold);
-        if (hover({rx, ry, 16, 16})) setTooltip(relicDef(p.relics[i]).name, relicDef(p.relics[i]).desc);
+    const int rows = std::max(1, int((kItemsTop - 4 - y) / 17));
+    const int capacity = rows * 8;
+    const bool overflow = int(p.relics.size()) > capacity;
+    const int shown = overflow ? capacity - 1 : int(p.relics.size());
+    for (int i = 0; i < shown; ++i) {
+        const float rx = ix + float(i % 8) * 16.5f;
+        const float ry = y + float(i / 8) * 17;
+        const RelicId r = p.relics[size_t(i)];
+        atlas().draw(relicSprite(r), rx, ry, pal::Gold);
+        if (hover({rx, ry, 16, 16})) setTooltip(relicDef(r).name, relicDef(r).desc);
     }
-    y += 18 * float((p.relics.size() + 6) / 7 + (p.relics.empty() ? 1 : 0)) + 6;
+    if (overflow) {
+        const float rx = ix + float(shown % 8) * 16.5f;
+        const float ry = y + float(shown / 8) * 17;
+        const std::string more = "+" + std::to_string(int(p.relics.size()) - shown);
+        panel({rx, ry, 16, 16}, pal::Floor, pal::Gold);
+        textCentered(more, rx + 8, ry + 3, pal::Gold);
+        if (hover({rx, ry, 16, 16})) {
+            std::string rest;
+            for (size_t i = size_t(shown); i < p.relics.size(); ++i)
+                rest += std::string(rest.empty() ? "" : ", ") + relicDef(p.relics[i]).name;
+            setTooltip("More relics", rest);
+        }
+    }
 
+    y = kItemsTop;
     text("ITEMS", ix, y, pal::Bone);
+    if (!p.items.empty()) text("R-click x2: discard", ix + 38, y, pal::Line);
     y += 12;
-    static const char* kKeys[] = {"Q", "W", "E", "R"};
-    for (int i = 0; i < balance::kInventorySlots; ++i) {
-        const Rectangle slot{ix + float(i) * 34, y, 30, 28};
+    static int armedDiscard = -1;  // first right-click arms, the second discards
+    static const char* kKeys[] = {"Q", "W", "E", "R", "T"};
+    const int slots = std::min(p.maxItems, 5);
+    const float pitch = slots > 4 ? 27 : 34;
+    for (int i = 0; i < slots; ++i) {
+        const Rectangle slot{ix + float(i) * pitch, y, pitch - 3, 28};
         const bool sel = i == selectedSlot;
-        panel(slot, sel ? pal::PanelHi : pal::Floor, sel ? pal::Gold : pal::Line);
+        const bool armed = i == armedDiscard && i < int(p.items.size());
+        panel(slot, sel ? pal::PanelHi : pal::Floor, armed ? pal::Red : sel ? pal::Gold : pal::Line);
         text(kKeys[i], slot.x + 2, slot.y + 1, pal::Dim);
         if (i < int(p.items.size())) {
             const ItemId id = p.items[size_t(i)];
-            atlas().draw(itemSprite(id), slot.x + 9, slot.y + 8, pal::Bone);
+            atlas().draw(itemSprite(id), slot.x + (slot.width - 16) / 2 + 1, slot.y + 8,
+                         id == ItemId::Bomb ? pal::Red : pal::Bone);
             if (hover(slot)) {
                 std::string body = itemDef(id).desc;
-                if (enc) body += itemDef(id).targeted ? " Click it, then a tile." : " Click to use.";
+                if (armed) body = "Right-click again to throw it away.";
+                else if (enc) body += itemDef(id).targeted ? " Click it, then a tile." : " Click to use.";
+                else body += usableAnywhere(id) ? " Click to use now." : " Use it on a board.";
                 setTooltip(itemDef(id).name, body);
             }
-            if (clicked(slot)) res.clickedSlot = i;
+            if (clicked(slot)) {
+                res.clickedSlot = i;
+                armedDiscard = -1;
+            }
+            if (input().right && hover(slot)) {
+                if (armed) {
+                    res.discardSlot = i;
+                    armedDiscard = -1;
+                } else {
+                    armedDiscard = i;
+                }
+            }
         }
     }
+    if (input().left && armedDiscard >= 0) armedDiscard = -1;  // any other click disarms
     y += 34;
     res.bottom = y;
 

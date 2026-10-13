@@ -61,16 +61,18 @@ void TitleScene::draw(App& app) {
     }
 
     const float bx = cx - 80;
-    if (ui::button({bx, 180, 160, 24}, "New Run")) app.go(std::make_unique<ClassSelectScene>(app));
-    if (ui::button({bx, 210, 160, 24}, "Camp (upgrades)")) app.go(std::make_unique<CampScene>());
-    if (ui::button({bx, 240, 160, 24}, "Codex")) app.go(std::make_unique<CodexScene>());
-    if (ui::button({bx, 270, 160, 24}, "Quit")) app.quit();
+    if (ui::button({bx, 166, 160, 22}, "New Run")) app.go(std::make_unique<ClassSelectScene>(app));
+    if (ui::button({bx, 192, 160, 22}, "Camp (upgrades)")) app.go(std::make_unique<CampScene>());
+    if (ui::button({bx, 218, 160, 22}, "Codex")) app.go(std::make_unique<CodexScene>());
+    if (ui::button({bx, 244, 160, 22}, "Options")) app.go(std::make_unique<OptionsScene>());
+    if (ui::button({bx, 270, 160, 22}, "Quit")) app.quit();
 
     const Meta& m = app.meta;
     atlas().draw(spr::Ember, cx - 90, 304, pal::Orange);
     ui::text(std::to_string(m.embers) + " embers", cx - 72, 308, pal::Orange);
     ui::text("Runs " + std::to_string(m.runs) + "  Wins " + std::to_string(m.wins), cx + 10, 308, pal::Dim);
-    ui::textCentered(std::string("F11 fullscreen   M ") + (audio::muted() ? "unmute" : "mute"), cx, 340, pal::Line);
+    ui::textCentered(std::string("F11 fullscreen   M ") + (audio::muted() ? "unmute" : "mute") + "   Esc pauses a run", cx,
+                     340, pal::Line);
 }
 
 // ---- Class select -----------------------------------------------------------
@@ -106,7 +108,7 @@ void ClassSelectScene::draw(App& app) {
         if (unlocked) {
             ui::text("HP " + std::to_string(d.maxHp) + "   XP " + std::to_string(d.xpPercent) + "%", card.x + 8,
                      card.y + 44, pal::Bone);
-            ui::textWrapped(d.desc, card.x + 8, card.y + 60, card.width - 16, pal::Dim);
+            ui::textWrapped(d.desc, card.x + 8, card.y + 60, card.width - 16, pal::Dim, 8);
         } else {
             ui::text("LOCKED", card.x + 8, card.y + 44, pal::Red);
             ui::textWrapped(d.unlockHint, card.x + 8, card.y + 60, card.width - 16, pal::Dim);
@@ -123,7 +125,7 @@ void ClassSelectScene::draw(App& app) {
     if (ui::button({heatBox.x + 96, heatBox.y + 5, 18, 16}, ">", heat_ < m.maxHeat)) ++heat_;
     std::string effects = heat_ == 0 ? "No heat. Win a run to unlock Heat 1." : "";
     for (int h = 1; h <= heat_; ++h) effects += std::string(h > 1 ? " " : "") + heatDesc(h);
-    ui::textWrapped(effects, heatBox.x + 124, heatBox.y + 8, heatBox.width - 132, pal::Dim);
+    ui::textWrapped(effects, heatBox.x + 124, heatBox.y + 6, heatBox.width - 132, pal::Dim, 4);
     if (heat_ > 0)
         ui::text("+" + std::to_string(15 * heat_) + "% embers", heatBox.x + 8, heatBox.y + 36, pal::Orange);
     else if (m.maxHeat > 0)

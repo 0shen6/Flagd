@@ -3,6 +3,7 @@
 // rules run through applyAction(), which returns Events for the UI to animate.
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/board.h"
@@ -23,6 +24,9 @@ struct Player {
     int xp = 0;
     int gold = 0;
     int shield = 0;
+    int whetstone = 0;            // attacks left that cost 1 less HP
+    int maxItems = balance::kInventorySlots;
+    int shopDiscount = 0;         // percent off shop prices
     int poison = 0;               // turns of 1-damage poison left
     bool halfLevelHeal = false;   // heat 3+
     uint32_t relicPool = 0;       // relics that may drop this run (bitmask of RelicId)
@@ -59,6 +63,9 @@ struct Encounter {
     bool exitFound = false;
     bool cleared = false;
     bool hexed = false;      // cursed: XP halved for this board
+    bool secondWindUsed = false;
+    int bossArmor = 0;       // boss can't be hurt while > 0
+    int bossArmorBase = 0;
     bool won = false;        // boss slain
     bool lost = false;       // player died
     bool descended = false;  // took the exit
@@ -82,7 +89,7 @@ struct Action {
 };
 
 enum class EventType : uint8_t {
-    Damage,       // amount = HP lost, aux = 1 if it was an ambush
+    Damage,       // amount = HP lost, aux = 1 ambush, 2 ambush on an unproven mark
     Heal,         // amount = HP gained
     Gold,         // amount = gold gained
     Kill,         // aux = MonsterKind
@@ -113,6 +120,10 @@ enum class EventType : uint8_t {
     Lucky,        // Gambler: an unproven reveal paid off
     FogLifts,     // the Fog Wyrm was hit; fog cleared around it
     Spawned,      // a Wisp was born at pos
+    BossArmored,  // attack bounced off; amount = armor, aux = % uncovered
+    ArmorBroken,  // amount = armor left
+    SecondWind,   // a killing blow left the player at 1 HP
+    Sensed,       // Compass / Treasure Sense revealed feature locations
     PlayerDied,
     Invalid,
 };
@@ -128,6 +139,13 @@ std::vector<Event> applyAction(Player& player, Encounter& enc, const Action& act
 
 // Adds an item if there is room. Returns false if the inventory is full.
 bool addItem(Player& player, ItemId id);
+// Items that work off the board (on the map, in rooms): Potion, Elixir,
+// Shield, Whetstone. The rest need a board to target or reveal.
+bool usableAnywhere(ItemId id);
+// Uses such an item outside a board. Returns a line describing the effect,
+// or "" if it can't be used now (wrong item, or a Potion at full health).
+std::string useItemOutside(Player& player, int slot);
+void discardItem(Player& player, int slot);
 void gainXp(Player& player, int amount, std::vector<Event>& events, bool halved = false);
 void heal(Player& player, int amount, std::vector<Event>& events);
 
@@ -140,5 +158,10 @@ int tenthStepCountdown(const Encounter& enc);
 
 // Seer's sight: bitmask of MonsterKinds among living hidden neighbours of p.
 uint32_t lurkingKinds(const Board& b, Pos p);
+
+// Percent of the board's safe tiles that are revealed (boss armor progress).
+int uncoveredPercent(const Board& b);
+// The uncovered percent at which the next armor point breaks (0 if none).
+int nextArmorBreak(const Encounter& enc);
 
 } // namespace flagd

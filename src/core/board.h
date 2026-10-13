@@ -33,6 +33,7 @@ struct Cell {
     bool liar = false;     // shows threat + liarOffset; the player can see it is a liar
     int8_t liarOffset = 0;
     bool clearFog = false; // exact number even on a fogged board
+    bool sensed = false;   // feature location known (Compass, Treasure Sense)
 };
 
 struct Monster {

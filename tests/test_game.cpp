@@ -113,6 +113,18 @@ TEST_CASE("boss board places a visible 2x2 Burrower") {
     CHECK(bosses == 1);
 }
 
+TEST_CASE("every boss board has its boss, however large the opening") {
+    for (int b = 0; b < 3; ++b)
+        for (int radius = 1; radius <= 5; ++radius)
+            for (uint64_t seed = 1; seed <= 6; ++seed) {
+                const auto params = balance::floorParams(7, false, true, balance::bossKindFor(b));
+                const GeneratedBoard g = generateBoard(params, {7, 4}, radius, seed);
+                int bosses = 0;
+                for (const Monster& m : g.board.monsters()) bosses += monsterDef(m.kind).boss;
+                CHECK(bosses == 1);
+            }
+}
+
 TEST_CASE("census matches floor parameters") {
     const auto params = balance::floorParams(3, false, false);
     const GeneratedBoard g = generateBoard(params, {5, 5}, 1, 7);
@@ -159,10 +171,140 @@ TEST_CASE("ambushes cost double, marked attacks cost the monster's power") {
     CHECK(before - p.hp == 2);  // slime power 1, ambush x2
     CHECK(countEvents(ev, EventType::Kill) == 1);
 
-    applyAction(p, e, {ActionType::SetMark, slimes[1], Mark::P1});
-    const int before2 = p.hp;
-    applyAction(p, e, {ActionType::Reveal, slimes[1]});
-    CHECK(before2 - p.hp == 1);
+}
+
+TEST_CASE("a mark only earns the prepared-attack cost when the monster is provable") {
+    // [1][S] : the revealed 1 proves the lone slime, so a marked attack costs 1.
+    Player p = makePlayer(ClassId::Warrior);
+    Encounter e = makeEncounter(balance::floorParams(0, false, false), 1);
+    e.generated = true;
+    e.board = Board(2, 1);
+    e.board.addMonster(MonsterKind::Slime, {{1, 0}});
+    e.board.at({0, 0}).revealed = true;
+    applyAction(p, e, {ActionType::SetMark, {1, 0}, Mark::P1});
+    int before = p.hp;
+    applyAction(p, e, {ActionType::Reveal, {1, 0}});
+    CHECK(before - p.hp == 1);
+
+    // Nothing revealed: marking a random tile and clicking it is still an ambush.
+    Player q = makePlayer(ClassId::Warrior);
+    Encounter f = makeEncounter(balance::floorParams(0, false, false), 1);
+    f.generated = true;
+    f.board = Board(4, 4);
+    f.board.addMonster(MonsterKind::Bat, {{3, 3}});
+    f.board.addMonster(MonsterKind::Bat, {{0, 3}});
+    applyAction(q, f, {ActionType::SetMark, {3, 3}, Mark::P2});
+    before = q.hp;
+    const auto ev = applyAction(q, f, {ActionType::Reveal, {3, 3}});
+    CHECK(before - q.hp == 4);  // bat power 2, ambush x2
+    bool flaggedGuess = false;
+    for (const Event& x : ev) flaggedGuess = flaggedGuess || (x.type == EventType::Damage && x.aux == 2);
+    CHECK(flaggedGuess);
+}
+
+TEST_CASE("boss armor blocks attacks until enough of the board is uncovered") {
+    Player p = makePlayer(ClassId::Warrior);
+    p.hp = p.maxHp = 200;
+    Encounter e = makeEncounter(balance::floorParams(7, false, true, MonsterKind::Burrower), 9);
+    applyAction(p, e, {ActionType::Reveal, {0, 0}});
+    REQUIRE(e.generated);
+    CHECK(e.bossArmor > 0);
+    Pos boss{-1, -1};
+    for (const Monster& m : e.board.monsters())
+        if (m.kind == MonsterKind::Burrower) boss = m.cells[0];
+    const int hpBefore = p.hp;
+    auto ev = applyAction(p, e, {ActionType::Reveal, boss});
+    CHECK(countEvents(ev, EventType::BossArmored) == 1);
+    CHECK(p.hp == hpBefore);  // a bounced attack costs nothing
+
+    // Reveal every safe tile: all armor must be gone.
+    for (int y = 0; y < e.board.height(); ++y)
+        for (int x = 0; x < e.board.width(); ++x)
+            if ((e.board.isHidden({x, y}) || e.board.at({x, y}).buried) && !e.board.livingMonsterAt({x, y}))
+                applyAction(p, e, {ActionType::Reveal, {x, y}});
+    for (int y = 0; y < e.board.height(); ++y)
+        for (int x = 0; x < e.board.width(); ++x)
+            if (e.board.at({x, y}).buried) applyAction(p, e, {ActionType::Reveal, {x, y}});
+    CHECK(e.bossArmor == 0);
+    ev = applyAction(p, e, {ActionType::Reveal, boss});
+    CHECK(countEvents(ev, EventType::BossHit) == 1);
+}
+
+TEST_CASE("fog boards really show ranges in play") {
+    Player p = makePlayer(ClassId::Warrior);
+    Encounter e = makeEncounter(balance::floorParams(3, false, false, MonsterKind::Burrower, Modifier::Fog), 4);
+    applyAction(p, e, {ActionType::Reveal, {7, 4}});
+    REQUIRE(e.board.fogged);
+    int ranges = 0;
+    for (int y = 0; y < e.board.height(); ++y)
+        for (int x = 0; x < e.board.width(); ++x)
+            if (e.board.at({x, y}).revealed && e.board.view({x, y}).hi > 0) ranges += !e.board.view({x, y}).exact();
+    CHECK(ranges > 0);
+
+    Player lit = makePlayer(ClassId::Warrior);
+    lit.relics.push_back(RelicId::Lantern);
+    Encounter e2 = makeEncounter(balance::floorParams(3, false, false, MonsterKind::Burrower, Modifier::Fog), 4);
+    applyAction(lit, e2, {ActionType::Reveal, {7, 4}});
+    CHECK_FALSE(e2.board.fogged);
+}
+
+TEST_CASE("a run is three acts with a boss each, then victory") {
+    Run r = newRun(5, ClassId::Warrior);
+    CHECK(r.bosses[0] != r.bosses[1]);
+    CHECK(r.bosses[1] != r.bosses[2]);
+    CHECK(r.map.bossKind == r.bosses[0]);
+    for (int act = 1; act <= kActs; ++act) {
+        Encounter won;
+        won.params.boss = true;
+        won.won = true;
+        finishBoard(r, won);
+        if (act < kActs) {
+            CHECK(r.actCleared);
+            CHECK_FALSE(r.over);
+            advanceAct(r);
+            CHECK(r.act == act + 1);
+            CHECK(r.map.bossKind == r.bosses[size_t(act)]);
+            CHECK(r.current == -1);
+        }
+    }
+    CHECK(r.over);
+    CHECK(r.victory);
+}
+
+TEST_CASE("items can be used between boards and discarded") {
+    Player p = makePlayer(ClassId::Warrior);
+    p.items = {ItemId::Scanner, ItemId::Potion, ItemId::Elixir};
+    CHECK(useItemOutside(p, 0).empty());  // a Scanner needs a board
+    CHECK(useItemOutside(p, 1).empty());  // full health: keep the Potion
+    p.hp = 3;
+    CHECK_FALSE(useItemOutside(p, 1).empty());
+    CHECK(p.hp == 3 + balance::kPotionHeal);
+    const int maxBefore = p.maxHp;
+    CHECK_FALSE(useItemOutside(p, 1).empty());  // the Elixir slid into slot 1
+    CHECK(p.maxHp == maxBefore + balance::kElixirMaxHp);
+    discardItem(p, 0);
+    CHECK(p.items.empty());
+}
+
+TEST_CASE("new items: bomb, elixir, compass, whetstone") {
+    Player p = makePlayer(ClassId::Warrior);
+    p.items = {ItemId::Bomb, ItemId::Elixir, ItemId::Compass, ItemId::Whetstone};
+    Encounter e = makeEncounter(balance::floorParams(0, false, false), 1);
+    e.generated = true;
+    e.board = Board(5, 5);
+    e.board.addMonster(MonsterKind::Skeleton, {{2, 2}});
+    e.board.at({4, 4}).feature = Feature::Exit;
+    applyAction(p, e, {ActionType::UseItem, {2, 2}, Mark::None, 0});
+    CHECK_FALSE(e.board.monsters()[0].alive);
+    CHECK(p.hp == p.maxHp);
+    const int maxBefore = p.maxHp;
+    applyAction(p, e, {ActionType::UseItem, {}, Mark::None, 0});
+    CHECK(p.maxHp == maxBefore + balance::kElixirMaxHp);
+    applyAction(p, e, {ActionType::UseItem, {}, Mark::None, 0});
+    CHECK(e.board.at({4, 4}).sensed);
+    applyAction(p, e, {ActionType::UseItem, {}, Mark::None, 0});
+    CHECK(p.whetstone == balance::kWhetstoneCharges);
+    CHECK(p.items.empty());
 }
 
 TEST_CASE("XP levels the player up, raising max HP and healing fully") {

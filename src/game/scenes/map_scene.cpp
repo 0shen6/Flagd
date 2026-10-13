@@ -45,10 +45,15 @@ void MapScene::update(App& app, float dt) {
 void MapScene::draw(App& app) {
     const Run& run = *app.game;
     const auto choices = run.choices();
-    ui::text("Choose your path", 172, 8, pal::Bone);
-    ui::text(std::string("Each step leads deeper. The ") + monsterDef(run.map.bossKind).name + " waits at the bottom.",
-             172, 21, pal::Dim);
-    ui::playerPanel(run, nullptr, -1);
+    ui::text("Act " + std::to_string(run.act) + " of " + std::to_string(kActs) + ": choose your path", 172, 8,
+             pal::Bone);
+    ui::textFit(std::string("Each step leads deeper. The ") + monsterDef(run.map.bossKind).name +
+                    " waits at the bottom.",
+                172, 21, 460, pal::Dim);
+    {
+        const auto hud = ui::playerPanel(run, nullptr, -1);
+        app.handleHudItems(hud.clickedSlot, hud.discardSlot);
+    }
 
     // Edges
     for (int id = 0; id < int(run.map.nodes.size()); ++id) {
@@ -91,23 +96,25 @@ void MapScene::draw(App& app) {
             std::string body = nodeBlurb(n.type);
             if (n.modifier != Modifier::None)
                 body += std::string(" Twist: ") + modifierDef(n.modifier).name + ". " + modifierDef(n.modifier).desc;
-            if (boss) body = std::string("The ") + monsterDef(run.map.bossKind).name + ". " +
-                             monsterDef(run.map.bossKind).blurb + " Slay it to win the run.";
+            if (boss)
+                body = std::string("The ") + monsterDef(run.map.bossKind).name + ". " + monsterDef(run.map.bossKind).blurb +
+                       (run.act < kActs ? " Slay it to reach the next act." : " Slay it to win the run.");
             ui::setTooltip(nodeTypeName(n.type), body);
         }
         if (available && ui::clicked(r)) clickedNode_ = id;
     }
 
-    // Legend, inside the side panel
-    ui::text("LEGEND", 10, 214, pal::Bone);
+    // Legend along the bottom of the map.
     const NodeType legend[] = {NodeType::Normal, NodeType::Elite, NodeType::Shop, NodeType::Rest, NodeType::Treasure,
                                NodeType::Event};
+    float lx = 172;
     for (int i = 0; i < 6; ++i) {
-        const float y = 228 + float(i) * 17;
-        atlas().draw(nodeSprite(legend[i]), 10, y, nodeColor(legend[i]));
-        ui::text(nodeTypeName(legend[i]), 30, y + 4, pal::Dim);
+        atlas().draw(nodeSprite(legend[i]), lx, 340, nodeColor(legend[i]));
+        ui::text(nodeTypeName(legend[i]), lx + 17, 344, pal::Dim);
+        lx += 22 + float(ui::textWidth(nodeTypeName(legend[i]))) + 8;
     }
-    ui::text("Blue badge: board twist", 10, 332, pal::Blue);
+    DrawRectangle(int(lx), 343, 9, 10, pal::Blue);
+    ui::text("twist", lx + 12, 344, pal::Blue);
 }
 
 } // namespace flagd

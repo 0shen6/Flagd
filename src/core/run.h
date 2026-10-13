@@ -1,5 +1,6 @@
 #pragma once
 // A whole run: player, map position, and the non-board rooms (shop, rest, treasure, events).
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -9,16 +10,22 @@
 
 namespace flagd {
 
+// A run is three acts (Slay the Spire style): each act is its own map that
+// ends in a boss. Beating a boss grants a relic choice and opens the next act.
 struct Run {
     uint64_t seed = 0;
     int heat = 0;
+    int act = 1;                              // 1..kActs
+    std::array<MonsterKind, kActs> bosses{};  // one boss per act, no repeats
+    bool actCleared = false;                  // this act's boss is down; reward pending
+    uint32_t bossesBeaten = 0;                // bitmask of MonsterKind
     Player player;
     Map map;
     int current = -1;       // node id; -1 before the first choice
     std::vector<int> path;  // nodes visited, in order
     bool over = false;
     bool victory = false;
-    int deepestLayer = -1;  // deepest layer entered
+    int deepestLayer = -1;  // deepest floor entered, counted across acts (0-based)
 
     // Effects carried into the next board (from events).
     int nextBonusRadius = 0;
@@ -41,6 +48,14 @@ Encounter beginEncounter(Run& run, int nodeId);
 
 // Call after a board ends (descended or boss slain).
 void finishBoard(Run& run, const Encounter& enc);
+
+// Floor number across the whole run (0-based) for a layer of the current act.
+int floorIndex(const Run& run, int layer);
+
+// Relics offered after an act's boss (up to 3, seeded).
+std::vector<RelicId> bossRelicChoices(const Run& run);
+// Moves to the next act: new map and boss, and a heal.
+void advanceAct(Run& run);
 
 struct ShopOffer {
     bool relic = false;

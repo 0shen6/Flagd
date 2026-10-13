@@ -1,4 +1,4 @@
-// Camp (permanent upgrades, relic unlocks) and the Codex.
+// Camp (permanent upgrades, relic unlocks), Options, and the Codex.
 #include "game/render/atlas.h"
 #include "game/render/ui.h"
 #include "game/scenes/scenes.h"
@@ -18,20 +18,21 @@ void CampScene::draw(App& app) {
     atlas().draw(spr::Ember, 540, 10, pal::Orange);
     ui::text(std::to_string(m.embers), 560, 14, pal::Orange, 20);
 
-    ui::text("UPGRADES", 20, 60, pal::Bone);
+    ui::text("UPGRADES", 20, 56, pal::Bone);
     for (int i = 0; i < kUpgradeKinds; ++i) {
         const UpgradeId id = UpgradeId(i);
         const UpgradeDef& d = upgradeDef(id);
-        const Rectangle row{20, 74 + float(i) * 34, 600, 30};
+        const Rectangle row{20 + float(i % 2) * 304, 70 + float(i / 2) * 34, 296, 30};
         ui::panel(row);
-        ui::text(d.name, row.x + 8, row.y + 4, pal::Bone);
-        ui::text(d.desc, row.x + 8, row.y + 16, pal::Dim);
+        ui::text(d.name, row.x + 6, row.y + 4, pal::Bone);
+        ui::textFit(d.desc, row.x + 6, row.y + 17, 204, pal::Dim);
+        const float pipX = row.x + 14 + float(ui::textWidth(d.name));  // level pips after the name
         for (int l = 0; l < d.maxLevel; ++l)
-            DrawRectangle(int(row.x + 330 + float(l) * 12), int(row.y + 10), 9, 9,
-                          l < m.upgrades[size_t(i)] ? pal::Orange : pal::Floor);
+            DrawRectangle(int(pipX + float(l) * 9), int(row.y + 5), 6, 6,
+                          l < m.upgrades[size_t(i)] ? pal::Orange : pal::Line);
         const int cost = upgradeCost(m, id);
-        const std::string label = cost < 0 ? "Maxed" : "Buy  " + std::to_string(cost);
-        if (ui::button({row.x + 480, row.y + 5, 110, 20}, label, cost >= 0 && m.embers >= cost)) {
+        const std::string label = cost < 0 ? "Maxed" : "Buy " + std::to_string(cost);
+        if (ui::button({row.x + 216, row.y + 5, 74, 20}, label, cost >= 0 && m.embers >= cost)) {
             if (buyUpgrade(m, id)) {
                 note_ = std::string(d.name) + " improved.";
                 app.saveProgress();
@@ -39,19 +40,19 @@ void CampScene::draw(App& app) {
         }
     }
 
-    ui::text("RELIC UNLOCKS  (adds them to the pool that shops, chests and treasure draw from)", 20, 216, pal::Bone);
+    ui::text("RELIC UNLOCKS: adds them to the pool for shops, chests and treasure", 20, 210, pal::Bone);
     int col = 0;
     for (int r = 0; r < kRelicKinds; ++r) {
         const RelicDef& d = relicDef(RelicId(r));
         if (d.unlockCost == 0) continue;
         const bool owned = (relicPool(m) >> r) & 1u;
-        const Rectangle card{20 + float(col) * 122, 230, 116, 92};
+        const Rectangle card{20 + float(col % 5) * 121, 224 + float(col / 5) * 52, 117, 48};
         ui::panel(card, owned ? pal::Floor : pal::Panel);
-        atlas().draw(relicSprite(RelicId(r)), card.x + 6, card.y + 6, owned ? pal::Gold : pal::Dim);
-        ui::text(d.name, card.x + 26, card.y + 10, owned ? pal::Gold : pal::Bone);
-        ui::textWrapped(d.desc, card.x + 6, card.y + 28, card.width - 12, pal::Dim);
+        atlas().draw(relicSprite(RelicId(r)), card.x + 4, card.y + 4, owned ? pal::Gold : pal::Dim);
+        ui::textFit(d.name, card.x + 22, card.y + 8, card.width - 26, owned ? pal::Gold : pal::Bone);
+        if (ui::hover(card)) ui::setTooltip(d.name, d.desc);
         const std::string label = owned ? "Unlocked" : "Unlock " + std::to_string(d.unlockCost);
-        if (ui::button({card.x + 6, card.y + 68, card.width - 12, 18}, label, !owned && m.embers >= d.unlockCost)) {
+        if (ui::button({card.x + 4, card.y + 25, card.width - 8, 18}, label, !owned && m.embers >= d.unlockCost)) {
             if (buyRelicUnlock(m, RelicId(r))) {
                 note_ = std::string(d.name) + " can now appear in runs.";
                 app.saveProgress();
@@ -59,7 +60,20 @@ void CampScene::draw(App& app) {
         }
         ++col;
     }
-    if (!note_.empty()) ui::text(note_, 160, 336, pal::Gold);
+    if (!note_.empty()) ui::textFit(note_, 150, 336, 470, pal::Gold);
+    if (ui::button({20, 332, 120, 20}, "Back")) app.toTitle();
+}
+
+// ---- Options ----------------------------------------------------------------
+
+void OptionsScene::update(App& app, float) {
+    if (IsKeyPressed(KEY_ESCAPE)) app.toTitle();
+}
+
+void OptionsScene::draw(App& app) {
+    ui::text("Options", 20, 12, pal::Gold, 20);
+    app.drawOptions(220, 120);
+    ui::text("Settings are saved with your progress.", 220, 200, pal::Dim);
     if (ui::button({20, 332, 120, 20}, "Back")) app.toTitle();
 }
 
@@ -91,10 +105,10 @@ void CodexScene::draw(App& app) {
             }
             std::string title = d.name;
             if (d.boss) title += ((m.bossesBeaten >> k) & 1u) ? "  (slain)" : "  (boss)";
-            ui::text(title, card.x + 46, card.y + 6, d.boss ? pal::Gold : pal::Bone);
+            ui::textFit(title, card.x + 46, card.y + 6, card.width - 50, d.boss ? pal::Gold : pal::Bone);
             std::string stats = "Power " + std::to_string(d.power) + "  Cost " + std::to_string(d.hitCost);
             if (d.trait != Trait::None) stats += std::string("  ") + traitDesc(d.trait);
-            ui::text(stats, card.x + 46, card.y + 18, pal::Dim);
+            ui::textFit(stats, card.x + 46, card.y + 18, card.width - 50, pal::Dim);
             ui::text("Slain: " + std::to_string(m.kills[size_t(k)]), card.x + 46, card.y + 30, pal::Dim);
             if (ui::hover(card)) ui::setTooltip(d.name, d.blurb);
         }
@@ -102,12 +116,13 @@ void CodexScene::draw(App& app) {
         for (int r = 0; r < kRelicKinds; ++r) {
             const RelicDef& d = relicDef(RelicId(r));
             const bool seen = (m.seenRelics >> r) & 1u;
-            const Rectangle card{20 + float(r % 3) * 202, 44 + float(r / 3) * 70, 196, 64};
+            const Rectangle card{20 + float(r % 4) * 151, 40 + float(r / 4) * 56, 147, 52};
             ui::panel(card);
-            atlas().draw(relicSprite(RelicId(r)), card.x + 6, card.y + 6, seen ? pal::Gold : pal::Line);
-            ui::text(seen ? d.name : "???", card.x + 26, card.y + 10, seen ? pal::Gold : pal::Dim);
-            ui::textWrapped(seen ? d.desc : "Not yet found.", card.x + 6, card.y + 28, card.width - 12,
-                            seen ? pal::Dim : pal::Line);
+            atlas().draw(relicSprite(RelicId(r)), card.x + 4, card.y + 4, seen ? pal::Gold : pal::Line);
+            ui::textFit(seen ? d.name : "???", card.x + 22, card.y + 8, card.width - 26, seen ? pal::Gold : pal::Dim);
+            ui::textWrapped(seen ? d.desc : "Not yet found.", card.x + 4, card.y + 24, card.width - 8,
+                            seen ? pal::Dim : pal::Line, 2);
+            if (seen && ui::hover(card)) ui::setTooltip(d.name, d.desc);
         }
     } else {
         for (int i = 1; i < kModifierKinds; ++i) {
@@ -116,11 +131,12 @@ void CodexScene::draw(App& app) {
             const Rectangle card{20, 44 + float(i - 1) * 50, 600, 44};
             ui::panel(card);
             ui::text(seen ? d.name : "???", card.x + 8, card.y + 8, seen ? pal::Blue : pal::Dim);
-            ui::text(seen ? d.desc : "Not yet encountered.", card.x + 8, card.y + 24, seen ? pal::Dim : pal::Line);
+            ui::textFit(seen ? d.desc : "Not yet encountered.", card.x + 8, card.y + 24, card.width - 16,
+                        seen ? pal::Dim : pal::Line);
         }
-        ui::text("Runs " + std::to_string(m.runs) + "   Wins " + std::to_string(m.wins) + "   Deepest floor " +
-                     std::to_string(m.bestLayer + 1) + "   Max heat " + std::to_string(m.maxHeat),
-                 20, 260, pal::Bone);
+        ui::textFit("Runs " + std::to_string(m.runs) + "   Wins " + std::to_string(m.wins) + "   Deepest floor " +
+                        std::to_string(m.bestLayer + 1) + "   Max heat " + std::to_string(m.maxHeat),
+                    20, 260, 600, pal::Bone);
     }
     if (ui::button({20, 332, 120, 20}, "Back")) app.toTitle();
 }

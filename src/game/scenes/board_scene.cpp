@@ -47,12 +47,21 @@ BoardScene::BoardScene(App& app, int nodeId) : nodeId_(nodeId), enc_(beginEncoun
     const float tilesH = float(enc_.params.height * 16);
     scale_ = std::max(1.0f, std::floor(std::min(kAreaW / tilesW, kAreaH / tilesH)));
     origin_ = {std::floor(kAreaX + (kAreaW - tilesW * scale_) / 2), std::floor(kAreaY + (kAreaH - tilesH * scale_) / 2)};
+    const Modifier mod = enc_.params.modifier;
     if (enc_.params.boss) {
         const MonsterKind boss = app.game->map.bossKind;
-        say(bossName(boss) + " waits below. " + monsterDef(boss).blurb, pal::Gold);
-    } else if (enc_.params.modifier != Modifier::None) {
-        say(std::string(modifierDef(enc_.params.modifier).name) + ": " + modifierDef(enc_.params.modifier).desc,
-            pal::Blue);
+        say(bossName(boss) + " waits below.", pal::Gold);
+        popupTitle_ = bossName(boss);
+        popupBody_ = std::string(monsterDef(boss).blurb) +
+                     " Armor makes it immune at first. Uncovering the board breaks it: one point at 40%, 70% "
+                     "and 95% of the safe tiles. Then strike.";
+    } else if (mod != Modifier::None) {
+        say(std::string("Twist: ") + modifierDef(mod).name, pal::Blue);
+        const uint32_t bit = 1u << int(mod);
+        if (!(app.meta.seenModifiers & bit) && !(app.game->player.seenModifiers & bit)) {
+            popupTitle_ = std::string("New twist: ") + modifierDef(mod).name;
+            popupBody_ = modifierDef(mod).desc;
+        }
     } else {
         say("Click any tile to begin. The first click is always safe.", pal::Bone);
     }
@@ -96,10 +105,16 @@ void BoardScene::floatAt(Pos p, const std::string& s, Color c) {
 
 void BoardScene::act(App& app, const Action& a) {
     const bool wasGenerated = enc_.generated;
+    if (a.type != ActionType::SetMark && a.type != ActionType::CycleMark) {
+        // Every action starts a fresh line, so old news never sticks around.
+        log_.clear();
+        logAge_ = 1;
+    }
     const auto events = applyAction(app.game->player, enc_, a);
     if (!wasGenerated && enc_.generated) {
         logAge_ = 1;
-        say(enc_.params.boss ? "Slay the boss to win the run." : "Find the stairs to descend. Clear the board for bonus gold.",
+        say(enc_.params.boss ? "Uncover the board to break the boss's armor, then strike."
+                             : "Find the stairs to descend. Clear the board for bonus gold.",
             pal::Bone);
         if (enc_.hexed) say("You carry a curse: XP is halved on this board.", pal::Purple);
         logAge_ = 0;
@@ -109,7 +124,6 @@ void BoardScene::act(App& app, const Action& a) {
 }
 
 void BoardScene::react(App& app, const std::vector<Event>& events) {
-    if (!events.empty() && logAge_ > 0) logAge_ = 1;  // a fresh log line per action
     Pos last{};
     Sfx sound = Sfx::None;
     auto want = [&](Sfx s) { sound = std::max(sound, s); };  // the loudest event wins
@@ -120,7 +134,8 @@ void BoardScene::react(App& app, const std::vector<Event>& events) {
         switch (e.type) {
             case EventType::Damage:
                 floatAt(e.pos, "-" + std::to_string(e.amount), pal::Red);
-                if (e.aux) say("Ambush! -" + std::to_string(e.amount) + " HP.", pal::Red);
+                if (e.aux == 2) say("Your mark was a guess: ambush! -" + std::to_string(e.amount) + " HP.", pal::Red);
+                else if (e.aux == 1) say("Ambush! -" + std::to_string(e.amount) + " HP.", pal::Red);
                 else say("-" + std::to_string(e.amount) + " HP.", pal::Red);
                 app.shake(e.aux ? 0.3f : 0.18f);
                 flash_ = e.aux ? 0.4f : 0.25f;
@@ -227,6 +242,22 @@ void BoardScene::react(App& app, const std::vector<Event>& events) {
                 want(Sfx::Error);
                 break;
             case EventType::Descend: want(Sfx::Descend); break;
+            case EventType::BossArmored:
+                pulses_.push_back({e.pos, 0});
+                say("Its armor holds (" + std::to_string(e.amount) + "). Uncover more: " + std::to_string(e.aux) +
+                        "% of " + std::to_string(nextArmorBreak(enc_)) + "%.",
+                    pal::Blue);
+                want(Sfx::Error);
+                break;
+            case EventType::ArmorBroken:
+                say(e.amount > 0 ? "Armor cracks! " + std::to_string(e.amount) + " left."
+                                 : std::string("The armor shatters! Strike now."),
+                    pal::Blue);
+                app.shake(0.2f);
+                want(Sfx::Explosion);
+                break;
+            case EventType::SecondWind: say("Second Wind! You cling on at 1 HP.", pal::Green); break;
+            case EventType::Sensed: break;
         }
     }
     if (sound == Sfx::None && !events.empty()) sound = Sfx::Reveal;
@@ -246,12 +277,12 @@ void BoardScene::update(App& app, float dt) {
     for (auto& p : pulses_) p.second += dt;
     std::erase_if(pulses_, [](const auto& p) { return p.second > 0.6f; });
 
-    if (enc_.lost || enc_.won || confirmExit_) return;
+    if (enc_.lost || enc_.won || confirmExit_ || !popupTitle_.empty()) return;
     Player& pl = app.game->player;
 
     // Item hotkeys
-    const int keys[] = {KEY_Q, KEY_W, KEY_E, KEY_R};
-    for (int i = 0; i < balance::kInventorySlots; ++i) {
+    const int keys[] = {KEY_Q, KEY_W, KEY_E, KEY_R, KEY_T};
+    for (int i = 0; i < std::min(pl.maxItems, 5); ++i) {
         if (!IsKeyPressed(keys[i]) || i >= int(pl.items.size())) continue;
         if (isTargeted(pl, i)) selectedSlot_ = selectedSlot_ == i ? -1 : i;
         else act(app, {ActionType::UseItem, {}, Mark::None, i});
@@ -362,6 +393,10 @@ void BoardScene::drawCell(Pos p, bool hovered, bool seer) {
         atlas().draw(spr::Rubble, r.x, r.y, pal::Brown, s);
         return;
     }
+    if (c.sensed && c.mark == Mark::None) {
+        const Spr icon = c.feature == Feature::Exit ? spr::Exit : c.feature == Feature::Chest ? spr::Chest : spr::Key;
+        atlas().draw(icon, r.x, r.y, Fade(pal::Gold, 0.35f), s);
+    }
     if (c.mark == Mark::Flag) {
         atlas().draw(spr::Flag, r.x, r.y, pal::Red, s);
     } else if (c.mark != Mark::None) {
@@ -371,10 +406,16 @@ void BoardScene::drawCell(Pos p, bool hovered, bool seer) {
     }
 }
 
-void BoardScene::drawHoverInfo() {
+void BoardScene::drawHoverInfo(const Player& pl) {
     Pos p;
     std::string info;
     const Board& b = enc_.board;
+    if (isTargeted(pl, selectedSlot_)) {
+        ui::textFit(std::string("Pick a tile for the ") + itemDef(pl.items[size_t(selectedSlot_)]).name +
+                        ". Esc cancels.",
+                    kAreaX, 334, kAreaW, pal::Gold);
+        return;
+    }
     if (!cellAt(ui::input().mouse, p)) {
         info = "LMB reveal/attack/chord   RMB mark   1 2 3 5 power mark   F flag   0 clear";
     } else if (!enc_.generated) {
@@ -386,7 +427,11 @@ void BoardScene::drawHoverInfo() {
             const MonsterDef& d = monsterDef(m->kind);
             info = std::string(d.name) + " (power " + std::to_string(d.power) + "). Click to attack: -" +
                    std::to_string(d.hitCost) + " HP, +" + std::to_string(d.xp) + " XP.";
-            if (d.boss) info += " Hits left: " + std::to_string(m->hp) + ".";
+            if (d.boss) {
+                info += " Hits left: " + std::to_string(m->hp) + ".";
+                if (enc_.bossArmor > 0) info = std::string(d.name) + " is armored. Uncover " +
+                                               std::to_string(nextArmorBreak(enc_)) + "% of the board to crack it.";
+            }
             if (d.trait == Trait::Dormant && b.surrounded(p)) info = std::string(d.name) + " sleeps soundly: free kill.";
         } else if (c.revealed) {
             const NumberView nv = b.view(p);
@@ -425,12 +470,13 @@ void BoardScene::drawHoverInfo() {
         } else if (c.buried) {
             info = "Buried by the Burrower. Known safe: click to dig it up.";
         } else if (c.mark != Mark::None) {
-            info = "Marked. Clicking attacks deliberately (no ambush penalty).";
+            info = "Marked. If you can prove a monster is here, clicking attacks it at normal cost; "
+                   "if the mark is a guess, it's an ambush.";
         } else {
             info = "Unknown tile.";
         }
     }
-    ui::text(info, kAreaX, 342, pal::Dim);
+    ui::textWrapped(info, kAreaX, 334, kAreaW, pal::Dim, 2);
 }
 
 void BoardScene::draw(App& app) {
@@ -443,6 +489,9 @@ void BoardScene::draw(App& app) {
     if (enc_.params.modifier != Modifier::None) header += std::string("  [") + modifierDef(enc_.params.modifier).name + "]";
     if (enc_.params.boss && enc_.generated && !enc_.won) {
         const MonsterKind boss = run.map.bossKind;
+        if (enc_.bossArmor > 0)
+            header += "    Armor " + std::to_string(enc_.bossArmor) + ": " + std::to_string(uncoveredPercent(b)) + "% / " +
+                      std::to_string(nextArmorBreak(enc_)) + "%";
         if (boss == MonsterKind::Burrower) {
             const int every = balance::kBossBurrowEvery;
             header += "    Burrows in " + std::to_string(every - enc_.turn % every) + " turn(s)";
@@ -451,10 +500,17 @@ void BoardScene::draw(App& app) {
             header += "    Births a Wisp in " + std::to_string(every - enc_.turn % every) + " turn(s)";
         }
     }
-    ui::text(header, kAreaX, 8, pal::Bone);
-    if (ui::hover({kAreaX, 6, float(ui::textWidth(header)), 12}) && enc_.params.modifier != Modifier::None)
+    ui::textFit(header, kAreaX, 8, enc_.exitFound ? kAreaW - 90 : kAreaW, pal::Bone);
+    if (ui::hover({kAreaX, 6, kAreaW, 12}) && enc_.params.modifier != Modifier::None)
         ui::setTooltip(modifierDef(enc_.params.modifier).name, modifierDef(enc_.params.modifier).desc);
-    if (!log_.empty()) ui::text(log_, kAreaX, 21, Fade(logColor_, logAge_ < 4 ? 1.0f : 0.55f));
+    if (!log_.empty()) {
+        // News fades after a few seconds; hover the line to read it in full.
+        const float alpha = std::clamp(1.0f - (logAge_ - 3.5f) / 1.0f, 0.0f, 1.0f);
+        if (alpha > 0) {
+            const bool cut = ui::textFit(log_, kAreaX, 21, kAreaW, Fade(logColor_, alpha));
+            if (cut && ui::hover({kAreaX, 19, kAreaW, 12})) ui::setTooltip("", log_);
+        }
+    }
 
     Pos hover{-1, -1};
     const bool hasHover = cellAt(ui::input().mouse, hover);
@@ -488,6 +544,10 @@ void BoardScene::draw(App& app) {
         for (int i = 0; i < m.hp; ++i)
             DrawRectangle(int(r.x + 2 + float(i) * 5 * scale_), int(r.y + r.height * 2 - 3 * scale_), int(4 * scale_),
                           int(2 * scale_), pal::Red);
+        if (monsterDef(m.kind).boss)
+            for (int i = 0; i < enc_.bossArmor; ++i)
+                DrawRectangle(int(r.x + 2 + float(i) * 5 * scale_), int(r.y + 1), int(4 * scale_), int(3 * scale_),
+                              pal::Blue);
     }
 
     // Flare readouts
@@ -528,52 +588,59 @@ void BoardScene::draw(App& app) {
     }
     if (flash_ > 0) DrawRectangle(0, 0, ui::kCanvasW, ui::kCanvasH, Fade(pal::Red, flash_ * 0.35f));
 
-    drawHoverInfo();
+    drawHoverInfo(pl);
 
     // HUD (drawn last so tooltips and clicks land on it)
     const auto hud = ui::playerPanel(run, &enc_, selectedSlot_);
+    if (hud.discardSlot >= 0 && hud.discardSlot < int(pl.items.size()) && !enc_.lost && !enc_.won) {
+        app.toast(std::string("Discarded the ") + itemDef(pl.items[size_t(hud.discardSlot)]).name + ".");
+        discardItem(app.game->player, hud.discardSlot);
+        selectedSlot_ = -1;
+    }
     if (hud.clickedSlot >= 0 && !enc_.lost && !enc_.won) {
         if (isTargeted(pl, hud.clickedSlot)) selectedSlot_ = selectedSlot_ == hud.clickedSlot ? -1 : hud.clickedSlot;
         else act(app, {ActionType::UseItem, {}, Mark::None, hud.clickedSlot});
     }
-    float hy = std::min(hud.bottom, 300.0f);
-    if (isTargeted(pl, selectedSlot_)) {
-        ui::text(std::string("Pick a tile (Esc cancels)"), 10, hy, pal::Gold);
-        hy += 12;
-    }
     if (enc_.exitFound && !enc_.lost)
-        if (ui::button({10, std::min(hy, 318.0f), 134, 18}, "Descend (stairs)")) confirmExit_ = true;
+        if (ui::button({kAreaX + kAreaW - 84, 4, 84, 15}, "Descend")) confirmExit_ = true;
 
     // Modals
     auto modal = [&](const std::string& title, const std::string& body) {
         DrawRectangle(0, 0, ui::kCanvasW, ui::kCanvasH, Fade(BLACK, 0.55f));
-        const Rectangle r{220, 120, 300, 110};
+        const Rectangle r{190, 112, 360, 116};
         ui::panel(r, pal::Bg, pal::Bone);
-        ui::textCentered(title, r.x + r.width / 2, r.y + 12, pal::Gold, 20);
-        ui::textWrapped(body, r.x + 14, r.y + 40, r.width - 28, pal::Bone);
+        ui::textCentered(ui::fitted(title, r.width - 20, 20), r.x + r.width / 2, r.y + 10, pal::Gold, 20);
+        ui::textWrapped(body, r.x + 14, r.y + 36, r.width - 28, pal::Bone, 4);
         return r;
     };
     if (confirmExit_) {
         const Rectangle r = modal("Descend?", enc_.cleared ? "The board is clear. Onward."
                                                            : "Anything still hidden here stays behind.");
-        if (ui::button({r.x + 30, r.y + 76, 110, 22}, "Descend") || IsKeyPressed(KEY_ENTER)) {
+        if (ui::button({r.x + 50, r.y + 84, 110, 22}, "Descend") || IsKeyPressed(KEY_ENTER)) {
             confirmExit_ = false;
             act(app, {ActionType::Descend});
-        } else if (ui::button({r.x + 160, r.y + 76, 110, 22}, "Stay") || IsKeyPressed(KEY_ESCAPE)) {
+        } else if (ui::button({r.x + 200, r.y + 84, 110, 22}, "Stay") || IsKeyPressed(KEY_ESCAPE)) {
             confirmExit_ = false;
         }
     } else if (enc_.lost) {
         const Rectangle r = modal("You have fallen", "The descent ends here. Your story will be told.");
-        if (ui::button({r.x + 95, r.y + 76, 110, 22}, "Results")) {
+        if (ui::button({r.x + 125, r.y + 84, 110, 22}, "Results")) {
             finishBoard(run, enc_);
             app.toEnd();
         }
     } else if (enc_.won) {
-        const Rectangle r = modal("Victory!", bossName(run.map.bossKind) + " is slain and the depths fall silent.");
-        if (ui::button({r.x + 95, r.y + 76, 110, 22}, "Results")) {
+        const bool last = run.act >= kActs;
+        const Rectangle r = modal(last ? "Victory!" : "Act " + std::to_string(run.act) + " cleared!",
+                                  bossName(run.map.bossKind) +
+                                      (last ? " is slain and the depths fall silent." : " is slain. Deeper still..."));
+        if (ui::button({r.x + 125, r.y + 84, 110, 22}, last ? "Results" : "Claim reward")) {
             finishBoard(run, enc_);
-            app.toEnd();
+            if (run.over) app.toEnd();
+            else app.go(std::make_unique<BossRewardScene>());
         }
+    } else if (!popupTitle_.empty()) {
+        const Rectangle r = modal(popupTitle_, popupBody_);
+        if (ui::button({r.x + 125, r.y + 84, 110, 22}, "Got it") || IsKeyPressed(KEY_ENTER)) popupTitle_.clear();
     }
 }
 

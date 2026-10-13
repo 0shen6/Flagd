@@ -10,14 +10,49 @@ std::vector<int> Run::choices() const {
     return map.nodes[size_t(current)].next;
 }
 
+namespace {
+
+Map mapForAct(const Run& r) {
+    return generateMap(deriveSeed(r.seed, uint64_t(r.act) * 7919), r.heat, r.act, r.bosses[size_t(r.act - 1)]);
+}
+
+} // namespace
+
 Run newRun(uint64_t seed, ClassId cls, int heat) {
     Run r;
     r.seed = seed;
     r.heat = heat;
     r.player = makePlayer(cls);
     r.player.halfLevelHeal = heat >= 3;
-    r.map = generateMap(seed, heat);
+    std::vector<int> order{0, 1, 2};
+    Rng rng(deriveSeed(seed, 0xB055));
+    rng.shuffle(order);
+    for (int i = 0; i < kActs; ++i) r.bosses[size_t(i)] = balance::bossKindFor(order[size_t(i) % 3]);
+    r.map = mapForAct(r);
     return r;
+}
+
+int floorIndex(const Run& run, int layer) { return (run.act - 1) * run.map.layers + layer; }
+
+std::vector<RelicId> bossRelicChoices(const Run& run) {
+    Rng rng(deriveSeed(run.seed, 0xB0550 + uint64_t(run.act)));
+    auto pool = availableRelics(run.player);
+    rng.shuffle(pool);
+    if (pool.size() > 3) pool.resize(3);
+    return pool;
+}
+
+void advanceAct(Run& run) {
+    if (run.act >= kActs) return;
+    ++run.act;
+    run.actCleared = false;
+    run.map = mapForAct(run);
+    run.current = -1;
+    run.path.clear();
+    Player& p = run.player;
+    const int percent = run.heat >= 3 ? balance::kActHealPercent / 2 : balance::kActHealPercent;
+    p.hp = std::min(p.maxHp, p.hp + (p.maxHp - p.hp) * percent / 100);
+    p.poison = 0;
 }
 
 bool travel(Run& run, int nodeId) {
@@ -25,15 +60,15 @@ bool travel(Run& run, int nodeId) {
     if (std::find(opts.begin(), opts.end(), nodeId) == opts.end()) return false;
     run.current = nodeId;
     run.path.push_back(nodeId);
-    run.deepestLayer = std::max(run.deepestLayer, run.node(nodeId).layer);
+    run.deepestLayer = std::max(run.deepestLayer, floorIndex(run, run.node(nodeId).layer));
     return true;
 }
 
 Encounter makeEncounterFor(const Run& run, int nodeId) {
     const MapNode& n = run.node(nodeId);
     const auto params = balance::floorParams(n.layer, n.type == NodeType::Elite, n.type == NodeType::Boss,
-                                             run.map.bossKind, n.modifier, run.heat);
-    return makeEncounter(params, deriveSeed(run.seed, uint64_t(nodeId) + 1));
+                                             run.map.bossKind, n.modifier, run.heat, run.act);
+    return makeEncounter(params, deriveSeed(run.seed, uint64_t(run.act) * 1000 + uint64_t(nodeId) + 1));
 }
 
 Encounter beginEncounter(Run& run, int nodeId) {
@@ -52,13 +87,21 @@ void finishBoard(Run& run, const Encounter& enc) {
     }
     ++run.player.floorsCleared;
     if (enc.won && enc.params.boss) {
-        run.over = true;
-        run.victory = true;
+        run.bossesBeaten |= 1u << int(run.map.bossKind);
+        if (run.act < kActs) {
+            run.actCleared = true;
+        } else {
+            run.over = true;
+            run.victory = true;
+        }
     }
 }
 
 std::vector<ShopOffer> makeShop(const Run& run, int nodeId) {
-    Rng rng(deriveSeed(run.seed, 0x5000 + uint64_t(nodeId)));
+    Rng rng(deriveSeed(run.seed, 0x5000 + uint64_t(run.act) * 100 + uint64_t(nodeId)));
+    auto price = [&](int base) {
+        return balance::shopPrice(base, run.heat, run.act) * (100 - run.player.shopDiscount) / 100;
+    };
     std::vector<ShopOffer> offers;
     std::vector<int> items;
     for (int i = 0; i < kItemKinds; ++i) items.push_back(i);
@@ -66,7 +109,7 @@ std::vector<ShopOffer> makeShop(const Run& run, int nodeId) {
     for (int i = 0; i < 3; ++i) {
         ShopOffer o;
         o.id = items[size_t(i)];
-        o.price = balance::shopPrice(itemDef(ItemId(o.id)).price + rng.range(-3, 3), run.heat);
+        o.price = price(itemDef(ItemId(o.id)).price + rng.range(-3, 3));
         offers.push_back(o);
     }
     auto relics = availableRelics(run.player);
@@ -75,7 +118,7 @@ std::vector<ShopOffer> makeShop(const Run& run, int nodeId) {
         ShopOffer o;
         o.relic = true;
         o.id = int(relics[i]);
-        o.price = balance::shopPrice(relicDef(relics[i]).price + rng.range(-8, 8), run.heat);
+        o.price = price(relicDef(relics[i]).price + rng.range(-8, 8));
         offers.push_back(o);
     }
     return offers;
@@ -107,12 +150,12 @@ void restFortify(Player& player) {
 }
 
 TreasureLoot takeTreasure(Run& run, int nodeId) {
-    Rng rng(deriveSeed(run.seed, 0x7000 + uint64_t(nodeId)));
+    Rng rng(deriveSeed(run.seed, 0x7000 + uint64_t(run.act) * 100 + uint64_t(nodeId)));
     TreasureLoot loot;
-    loot.gold = rng.range(12, 24);
+    loot.gold = rng.range(8, 16);
     const auto pool = availableRelics(run.player);
     if (pool.empty()) {
-        loot.gold += 50;
+        loot.gold += 30;
     } else {
         loot.hasRelic = true;
         loot.relic = rng.pick(pool);
@@ -148,12 +191,13 @@ static_assert(sizeof(kEvents) / sizeof(kEvents[0]) == int(EventId::Count));
 const EventDef& eventDef(EventId id) { return kEvents[int(id)]; }
 
 EventId eventAt(const Run& run, int nodeId) {
-    return EventId(deriveSeed(run.seed, 0x9000 + uint64_t(nodeId)) % uint64_t(EventId::Count));
+    return EventId(deriveSeed(run.seed, 0x9000 + uint64_t(run.act) * 100 + uint64_t(nodeId)) %
+                   uint64_t(EventId::Count));
 }
 
 bool eventOptionAllowed(const Run& run, EventId id, int option) {
     const Player& p = run.player;
-    if (option != 0) return id != EventId::Spring || int(p.items.size()) < balance::kInventorySlots;
+    if (option != 0) return id != EventId::Spring || int(p.items.size()) < p.maxItems;
     switch (id) {
         case EventId::BloodShrine: return p.hp > 5 && !availableRelics(p).empty();
         case EventId::Gamble: return p.gold >= 25;
@@ -170,7 +214,7 @@ std::string resolveEvent(Run& run, int nodeId, int option) {
     const EventId id = eventAt(run, nodeId);
     if (!eventOptionAllowed(run, id, option)) return "";
     Player& p = run.player;
-    Rng rng(deriveSeed(run.seed, 0x9100 + uint64_t(nodeId)));
+    Rng rng(deriveSeed(run.seed, 0x9100 + uint64_t(run.act) * 100 + uint64_t(nodeId)));
     std::vector<Event> ignored;
     switch (id) {
         case EventId::BloodShrine: {

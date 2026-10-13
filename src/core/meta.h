@@ -10,7 +10,17 @@
 
 namespace flagd {
 
-enum class UpgradeId : uint8_t { Vitality, Purse, Prepared, Cartography, Count };
+enum class UpgradeId : uint8_t {
+    Vitality,
+    Purse,
+    Prepared,
+    Cartography,
+    SharpEyes,
+    DeepPockets,
+    Veteran,
+    Haggler,
+    Count
+};
 constexpr int kUpgradeKinds = int(UpgradeId::Count);
 
 struct UpgradeDef {
@@ -28,16 +38,23 @@ struct Meta {
     int bestLayer = -1;
     int maxHeat = 0;  // highest heat unlocked
     uint32_t classes = 1u << int(ClassId::Warrior);
-    uint32_t relics = 0;  // unlocked relic pool; 0 means "not set yet" (filled with the base pool)
+    uint32_t relics = 0;  // relics unlocked at the Camp (the base set is always available)
     uint32_t seenMonsters = 0;
     uint32_t seenRelics = 0;
     uint32_t seenModifiers = 0;
     uint32_t bossesBeaten = 0;  // bitmask of MonsterKind
     std::array<int, kMonsterKinds> kills{};
     std::array<int, kUpgradeKinds> upgrades{};
+
+    // Settings
+    bool fullscreen = false;
+    bool muted = false;
+    bool pixelPerfect = true;  // integer scaling only (else fill the window)
+    int windowPreset = 1;      // index into the window size presets
 };
 
 bool classUnlocked(const Meta& m, ClassId c);
+// Relics that may appear in runs: the base set plus everything unlocked.
 uint32_t relicPool(const Meta& m);
 
 // A new run with the camp upgrades and unlocked relic pool applied.
